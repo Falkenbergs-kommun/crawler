@@ -1,0 +1,26 @@
+[project]
+name = "crawler"
+version = "0.1.0"
+description = "Web crawler that indexes websites into Qdrant collections for RAG"
+requires-python = ">=3.10"
+dependencies = [
+    "crawl4ai>=0.4",
+    "playwright",
+    "qdrant-client>=1.12",
+    "openai>=1.0",
+    "langchain-text-splitters>=0.3",
+    "tiktoken",
+    "click>=8.0",
+    "pyyaml",
+    "python-dotenv",
+]
+
+[project.scripts]
+crawler = "crawler.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/crawler"]

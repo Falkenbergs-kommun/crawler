@@ -1,0 +1,24 @@
+collections:
+  - name: "fokus-ai"
+    sites:
+      - url: "https://sites.google.com/falkenberg.se/fokus-ai/startsida"
+        max_depth: 3
+        allowed_domains:
+          - "sites.google.com"
+        url_filter: "/falkenberg.se/fokus-ai/"
+
+  - name: "unikum-guider"
+    sites:
+      - url: "https://sites.google.com/falkenberg.se/unikumguider"
+        max_depth: 3
+        allowed_domains:
+          - "sites.google.com"
+        url_filter: "/falkenberg.se/unikumguider/"
+
+  - name: "buf-digitalisering"
+    sites:
+      - url: "https://sites.google.com/falkenberg.se/bufdigitalisering"
+        max_depth: 3
+        allowed_domains:
+          - "sites.google.com"
+        url_filter: "/falkenberg.se/bufdigitalisering/"
