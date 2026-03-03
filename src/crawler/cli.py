@@ -65,6 +65,12 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                 click.echo("  No pages found.")
                 continue
 
+            # Remove old data for this site before upserting new
+            click.echo("  Removing old vectors for this site...")
+            delete_site_from_collection(
+                cfg.qdrant_url, cfg.qdrant_api_key, coll.name, site.url
+            )
+
             # Chunk all crawled pages
             all_chunks = []
             for page in pages:

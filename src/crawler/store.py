@@ -125,12 +125,12 @@ def upsert_chunks(
 def delete_site_from_collection(
     url: str, api_key: str | None, collection_name: str, site_url: str
 ) -> None:
-    """Delete all points from a specific site URL within a collection."""
+    """Delete all points originating from a site (by site_name metadata)."""
     client = _make_client(url, api_key)
     client.delete(
         collection_name=collection_name,
         points_selector=Filter(
-            must=[FieldCondition(key="source_url", match=MatchValue(value=site_url))]
+            must=[FieldCondition(key="site_name", match=MatchValue(value=site_url))]
         ),
     )
 
