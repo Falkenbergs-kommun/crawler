@@ -10,6 +10,7 @@ import click
 from .chunker import chunk_page
 from .config import load_config
 from .embedder import embed_texts
+from .gdrive import extract_google_documents, extract_youtube_metadata
 from .scraper import crawl_site
 from .store import (
     delete_collection,
@@ -64,7 +65,7 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                 click.echo("  No pages found.")
                 continue
 
-            # Chunk all pages
+            # Chunk all crawled pages
             all_chunks = []
             for page in pages:
                 chunks = chunk_page(
@@ -74,6 +75,47 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                     site_name=site.url,
                 )
                 all_chunks.extend(chunks)
+
+            # Extract Google Drive/Docs documents linked from pages
+            click.echo("  Checking for Google Drive documents...")
+            seen_doc_urls: set[str] = set()
+            for page in pages:
+                docs = extract_google_documents(page.external_links, page.url, page.raw_html)
+                for doc in docs:
+                    if doc.source_url in seen_doc_urls:
+                        continue
+                    seen_doc_urls.add(doc.source_url)
+                    doc_chunks = chunk_page(
+                        markdown=doc.text,
+                        source_url=doc.source_url,
+                        page_title=doc.title,
+                        site_name=site.url,
+                    )
+                    # Tag chunks with content type
+                    for c in doc_chunks:
+                        c.metadata["content_type"] = doc.content_type
+                        c.metadata["linked_from"] = page.url
+                    all_chunks.extend(doc_chunks)
+
+            # Extract YouTube video metadata
+            click.echo("  Checking for YouTube videos...")
+            seen_yt_urls: set[str] = set()
+            for page in pages:
+                yt_docs = extract_youtube_metadata(page.external_links, page.raw_html)
+                for doc in yt_docs:
+                    if doc.source_url in seen_yt_urls:
+                        continue
+                    seen_yt_urls.add(doc.source_url)
+                    doc_chunks = chunk_page(
+                        markdown=doc.text,
+                        source_url=doc.source_url,
+                        page_title=doc.title,
+                        site_name=site.url,
+                    )
+                    for c in doc_chunks:
+                        c.metadata["content_type"] = "youtube_video"
+                        c.metadata["linked_from"] = page.url
+                    all_chunks.extend(doc_chunks)
 
             click.echo(f"  {len(all_chunks)} chunks from {len(pages)} pages")
 

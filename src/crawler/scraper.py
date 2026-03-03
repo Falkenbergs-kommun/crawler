@@ -19,10 +19,18 @@ class PageResult:
     url: str
     title: str
     markdown: str
+    raw_html: str = ""
+    external_links: list[str] = None
+
+    def __post_init__(self):
+        if self.external_links is None:
+            self.external_links = []
 
 
-async def _crawl_page(crawler: AsyncWebCrawler, url: str) -> tuple[str, str, list[str]]:
-    """Crawl a single page. Returns (markdown, title, found_links)."""
+async def _crawl_page(
+    crawler: AsyncWebCrawler, url: str
+) -> tuple[str, str, str, list[str], list[str]]:
+    """Crawl a single page. Returns (markdown, raw_html, title, internal_links, external_links)."""
     config = CrawlerRunConfig(
         markdown_generator=DefaultMarkdownGenerator(
             content_source="fit_html",
@@ -30,27 +38,33 @@ async def _crawl_page(crawler: AsyncWebCrawler, url: str) -> tuple[str, str, lis
         wait_until="domcontentloaded",
         page_timeout=60000,
         delay_before_return_html=3.0,  # Wait for JS rendering after DOM load
+        process_iframes=True,
     )
 
     result = await crawler.arun(url=url, config=config)
 
     if not result.success:
         click.echo(f"  Failed to crawl: {url} — {result.error_message}")
-        return "", "", []
+        return "", "", "", [], []
 
     markdown = result.markdown.raw_markdown if result.markdown else ""
+    raw_html = result.html or ""
     title = result.metadata.get("title", "") if result.metadata else ""
 
-    # Extract internal links from the page
-    links = []
+    # Separate internal and external links
+    internal_links = []
+    external_links = []
     if result.links:
-        for link_group in [result.links.get("internal", []), result.links.get("external", [])]:
-            for link in link_group:
-                href = link.get("href", "") if isinstance(link, dict) else str(link)
-                if href:
-                    links.append(urljoin(url, href))
+        for link in result.links.get("internal", []):
+            href = link.get("href", "") if isinstance(link, dict) else str(link)
+            if href:
+                internal_links.append(urljoin(url, href))
+        for link in result.links.get("external", []):
+            href = link.get("href", "") if isinstance(link, dict) else str(link)
+            if href:
+                external_links.append(urljoin(url, href))
 
-    return markdown, title, links
+    return markdown, raw_html, title, internal_links, external_links
 
 
 def _should_follow(link: str, site: SiteConfig) -> bool:
@@ -113,14 +127,19 @@ async def crawl_site(site: SiteConfig) -> list[PageResult]:
 
             click.echo(f"  [{depth}] Crawling: {url}")
 
-            markdown, title, links = await _crawl_page(crawler, url)
+            markdown, raw_html, title, internal_links, ext_links = await _crawl_page(
+                crawler, url
+            )
 
             if markdown.strip():
-                results.append(PageResult(url=url, title=title, markdown=markdown))
+                results.append(PageResult(
+                    url=url, title=title, markdown=markdown,
+                    raw_html=raw_html, external_links=ext_links,
+                ))
 
             # Add child links if we haven't reached max depth
             if depth < site.max_depth:
-                for link in links:
+                for link in internal_links:
                     link_normalized = unquote(link.rstrip("/").split("#")[0].split("?")[0])
                     if link_normalized not in visited and _should_follow(link, site):
                         queue.append((link, depth + 1))
