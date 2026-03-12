@@ -31,6 +31,24 @@ async def _crawl_page(
     crawler: AsyncWebCrawler, url: str
 ) -> tuple[str, str, str, list[str], list[str]]:
     """Crawl a single page. Returns (markdown, raw_html, title, internal_links, external_links)."""
+    # Remove cross-origin iframes (YouTube, Google Maps, etc.) before crawl4ai's
+    # process_iframes tries to evaluate JS inside them, which causes
+    # "speed_rate_placeholder is not defined" errors.  We extract YouTube
+    # metadata separately in gdrive.py via oEmbed, so nothing is lost.
+    remove_cross_origin_iframes_js = """
+    (() => {
+        const dominated = window.location.hostname;
+        document.querySelectorAll('iframe').forEach(f => {
+            try {
+                const src = f.src || '';
+                if (!src) return;
+                const host = new URL(src).hostname;
+                if (host && host !== dominated) f.remove();
+            } catch(e) { f.remove(); }
+        });
+    })();
+    """
+
     config = CrawlerRunConfig(
         markdown_generator=DefaultMarkdownGenerator(
             content_source="fit_html",
@@ -39,6 +57,7 @@ async def _crawl_page(
         page_timeout=60000,
         delay_before_return_html=3.0,  # Wait for JS rendering after DOM load
         process_iframes=True,
+        js_code=remove_cross_origin_iframes_js,
     )
 
     result = await crawler.arun(url=url, config=config)

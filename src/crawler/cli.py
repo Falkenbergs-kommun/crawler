@@ -7,15 +7,17 @@ from pathlib import Path
 
 import click
 
-from .chunker import chunk_page
+from .chunker import chunk_page, content_hash
 from .config import load_config
 from .embedder import embed_texts
 from .gdrive import extract_google_documents, extract_youtube_metadata
 from .scraper import crawl_site
 from .store import (
+    delete_by_source_urls,
     delete_collection,
     delete_site_from_collection,
     ensure_collection,
+    get_existing_hashes,
     list_collections,
     upsert_chunks,
 )
@@ -38,9 +40,14 @@ def cli(ctx: click.Context, config_path: str) -> None:
 
 @cli.command()
 @click.option("--collection", default=None, help="Only crawl sites for this collection")
+@click.option("--force", is_flag=True, help="Force re-embedding of all pages, ignoring content hashes")
 @click.pass_context
-def crawl(ctx: click.Context, collection: str | None) -> None:
-    """Crawl websites and store embeddings in Qdrant."""
+def crawl(ctx: click.Context, collection: str | None, force: bool) -> None:
+    """Crawl websites and store embeddings in Qdrant.
+
+    By default, only new or changed pages are embedded (incremental sync).
+    Pages that no longer exist are removed. Use --force to re-embed everything.
+    """
     cfg = load_config(ctx.obj["config_path"])
 
     collections = cfg.collections
@@ -65,24 +72,22 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                 click.echo("  No pages found.")
                 continue
 
-            # Remove old data for this site before upserting new
-            click.echo("  Removing old vectors for this site...")
-            delete_site_from_collection(
-                cfg.qdrant_url, cfg.qdrant_api_key, coll.name, site.url
-            )
-
-            # Chunk all crawled pages
-            all_chunks = []
+            # Build {source_url: content_hash} for all crawled content
+            crawled_hashes: dict[str, str] = {}
             for page in pages:
-                chunks = chunk_page(
-                    markdown=page.markdown,
-                    source_url=page.url,
-                    page_title=page.title,
-                    site_name=site.url,
-                )
-                all_chunks.extend(chunks)
+                crawled_hashes[page.url] = content_hash(page.markdown)
 
-            # Extract Google Drive/Docs documents linked from pages
+            # Collect all content: pages + Google Docs + YouTube
+            # We store content keyed by source_url so we can diff later
+            page_content: dict[str, dict] = {}
+            for page in pages:
+                page_content[page.url] = {
+                    "markdown": page.markdown,
+                    "title": page.title,
+                    "extra_meta": {},
+                }
+
+            # Extract Google Drive/Docs documents
             click.echo("  Checking for Google Drive documents...")
             seen_doc_urls: set[str] = set()
             for page in pages:
@@ -91,17 +96,15 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                     if doc.source_url in seen_doc_urls:
                         continue
                     seen_doc_urls.add(doc.source_url)
-                    doc_chunks = chunk_page(
-                        markdown=doc.text,
-                        source_url=doc.source_url,
-                        page_title=doc.title,
-                        site_name=site.url,
-                    )
-                    # Tag chunks with content type
-                    for c in doc_chunks:
-                        c.metadata["content_type"] = doc.content_type
-                        c.metadata["linked_from"] = page.url
-                    all_chunks.extend(doc_chunks)
+                    crawled_hashes[doc.source_url] = content_hash(doc.text)
+                    page_content[doc.source_url] = {
+                        "markdown": doc.text,
+                        "title": doc.title,
+                        "extra_meta": {
+                            "content_type": doc.content_type,
+                            "linked_from": page.url,
+                        },
+                    }
 
             # Extract YouTube video metadata
             click.echo("  Checking for YouTube videos...")
@@ -112,18 +115,71 @@ def crawl(ctx: click.Context, collection: str | None) -> None:
                     if doc.source_url in seen_yt_urls:
                         continue
                     seen_yt_urls.add(doc.source_url)
-                    doc_chunks = chunk_page(
-                        markdown=doc.text,
-                        source_url=doc.source_url,
-                        page_title=doc.title,
-                        site_name=site.url,
-                    )
-                    for c in doc_chunks:
-                        c.metadata["content_type"] = "youtube_video"
-                        c.metadata["linked_from"] = page.url
-                    all_chunks.extend(doc_chunks)
+                    crawled_hashes[doc.source_url] = content_hash(doc.text)
+                    page_content[doc.source_url] = {
+                        "markdown": doc.text,
+                        "title": doc.title,
+                        "extra_meta": {
+                            "content_type": "youtube_video",
+                            "linked_from": page.url,
+                        },
+                    }
 
-            click.echo(f"  {len(all_chunks)} chunks from {len(pages)} pages")
+            # Diff against existing hashes in Qdrant
+            if force:
+                existing_hashes: dict[str, str] = {}
+            else:
+                existing_hashes = get_existing_hashes(
+                    cfg.qdrant_url, cfg.qdrant_api_key, coll.name, site.url
+                )
+
+            all_crawled_urls = set(crawled_hashes.keys())
+            all_existing_urls = set(existing_hashes.keys())
+
+            unchanged = {
+                url for url in all_crawled_urls & all_existing_urls
+                if crawled_hashes[url] == existing_hashes[url]
+            }
+            changed_or_new = all_crawled_urls - unchanged
+            stale = all_existing_urls - all_crawled_urls
+
+            click.echo(f"  {len(all_crawled_urls)} URLs crawled: "
+                        f"{len(unchanged)} unchanged, {len(changed_or_new)} new/changed, "
+                        f"{len(stale)} stale")
+
+            # Delete stale URLs (pages that no longer exist)
+            if stale:
+                click.echo(f"  Removing {len(stale)} stale URLs...")
+                delete_by_source_urls(
+                    cfg.qdrant_url, cfg.qdrant_api_key, coll.name, stale
+                )
+
+            if not changed_or_new:
+                click.echo("  Nothing to update.")
+                continue
+
+            # Delete old vectors for changed URLs before re-upserting
+            changed_existing = changed_or_new & all_existing_urls
+            if changed_existing:
+                delete_by_source_urls(
+                    cfg.qdrant_url, cfg.qdrant_api_key, coll.name, changed_existing
+                )
+
+            # Chunk only changed/new content
+            all_chunks = []
+            for source_url in sorted(changed_or_new):
+                content = page_content[source_url]
+                chunks = chunk_page(
+                    markdown=content["markdown"],
+                    source_url=source_url,
+                    page_title=content["title"],
+                    site_name=site.url,
+                )
+                for c in chunks:
+                    c.metadata.update(content["extra_meta"])
+                all_chunks.extend(chunks)
+
+            click.echo(f"  {len(all_chunks)} chunks to embed")
 
             if not all_chunks:
                 continue

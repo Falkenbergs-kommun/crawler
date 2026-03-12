@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date
 
 import tiktoken
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+
+def content_hash(text: str) -> str:
+    """SHA-256 hash of text content, used for change detection."""
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 @dataclass
@@ -45,6 +51,7 @@ def chunk_page(
     texts = splitter.split_text(markdown)
 
     today = date.today().isoformat()
+    md_hash = content_hash(markdown)
     chunks = []
 
     for i, text in enumerate(texts):
@@ -58,6 +65,7 @@ def chunk_page(
                     "chunk_index": i,
                     "total_chunks": len(texts),
                     "crawl_date": today,
+                    "content_hash": md_hash,
                 },
             )
         )

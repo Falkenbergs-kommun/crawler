@@ -59,6 +59,18 @@ def find_google_links(urls: list[str]) -> list[tuple[str, str, str]]:
     return found
 
 
+def _canonical_url(doc_id: str, doc_type: str) -> str:
+    """Return a canonical URL for a Google document, stripping query/fragment variants."""
+    if doc_type == "google_doc":
+        return f"https://docs.google.com/document/d/{doc_id}"
+    elif doc_type == "google_sheet":
+        return f"https://docs.google.com/spreadsheets/d/{doc_id}"
+    elif doc_type == "google_slides":
+        return f"https://docs.google.com/presentation/d/{doc_id}"
+    else:  # drive_file
+        return f"https://drive.google.com/file/d/{doc_id}"
+
+
 def find_youtube_ids(urls: list[str]) -> list[tuple[str, str]]:
     """Find YouTube video URLs and return (url, video_id)."""
     found = []
@@ -92,11 +104,29 @@ def _download_google_sheet(doc_id: str) -> str:
 
 
 def _download_google_slides(doc_id: str) -> str:
-    """Download Google Slides as plain text."""
-    url = f"https://docs.google.com/presentation/d/{doc_id}/export?format=txt"
-    resp = httpx.get(url, follow_redirects=True, timeout=30)
+    """Download Google Slides as plain text.
+
+    Tries txt export first; falls back to scraping the public /pub HTML,
+    since Slides export often returns 401 even for published presentations.
+    """
+    # Try direct export first (works for fully public presentations)
+    export_url = f"https://docs.google.com/presentation/d/{doc_id}/export?format=txt"
+    resp = httpx.get(export_url, follow_redirects=True, timeout=30)
+    if resp.status_code == 200 and resp.text.strip():
+        return resp.text
+
+    # Fallback: scrape the published HTML version
+    pub_url = f"https://docs.google.com/presentation/d/{doc_id}/pub"
+    resp = httpx.get(pub_url, follow_redirects=True, timeout=30)
     resp.raise_for_status()
-    return resp.text
+
+    # Extract visible text from slide frames (strip HTML tags)
+    import re as _re
+    # Remove script/style blocks, then tags, collapse whitespace
+    html = _re.sub(r"<(script|style)[^>]*>.*?</\1>", "", resp.text, flags=_re.DOTALL)
+    text = _re.sub(r"<[^>]+>", " ", html)
+    text = _re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _download_drive_file(doc_id: str) -> str:
@@ -162,7 +192,8 @@ def extract_google_documents(
 
     google_links = find_google_links(all_links)
     for link_url, doc_id, doc_type in google_links:
-        click.echo(f"    Extracting [{doc_type}]: {link_url[:80]}...")
+        canonical = _canonical_url(doc_id, doc_type)
+        click.echo(f"    Extracting [{doc_type}]: {canonical}...")
         try:
             if doc_type == "google_doc":
                 text = _download_google_doc(doc_id)
@@ -179,7 +210,7 @@ def extract_google_documents(
 
             if text and text.strip():
                 results.append(ExtractedDocument(
-                    source_url=link_url,
+                    source_url=canonical,
                     title=title,
                     text=text.strip(),
                     content_type=doc_type,

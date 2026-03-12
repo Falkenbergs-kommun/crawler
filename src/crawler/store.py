@@ -122,6 +122,55 @@ def upsert_chunks(
     return len(points)
 
 
+def get_existing_hashes(
+    url: str, api_key: str | None, collection_name: str, site_name: str
+) -> dict[str, str]:
+    """Get {source_url: content_hash} for all points belonging to a site."""
+    client = _make_client(url, api_key)
+    result: dict[str, str] = {}
+
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="site_name", match=MatchValue(value=site_name))]
+            ),
+            with_payload=["source_url", "content_hash"],
+            with_vectors=False,
+            limit=100,
+            offset=offset,
+        )
+        for p in points:
+            src = p.payload.get("source_url", "")
+            h = p.payload.get("content_hash", "")
+            if src and h:
+                result[src] = h
+        if offset is None:
+            break
+
+    return result
+
+
+def delete_by_source_urls(
+    url: str, api_key: str | None, collection_name: str, source_urls: set[str]
+) -> int:
+    """Delete all points matching any of the given source_urls. Returns count deleted."""
+    if not source_urls:
+        return 0
+    client = _make_client(url, api_key)
+    count = 0
+    for source_url in source_urls:
+        client.delete(
+            collection_name=collection_name,
+            points_selector=Filter(
+                must=[FieldCondition(key="source_url", match=MatchValue(value=source_url))]
+            ),
+        )
+        count += 1
+    return count
+
+
 def delete_site_from_collection(
     url: str, api_key: str | None, collection_name: str, site_url: str
 ) -> None:
