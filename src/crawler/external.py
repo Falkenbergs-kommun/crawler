@@ -29,6 +29,7 @@ from .store import (
     delete_by_source_urls,
     ensure_collection,
     get_existing_hashes,
+    url_exists_in_qdrant,
     upsert_chunks,
 )
 
@@ -302,6 +303,15 @@ async def process_documents(
             _, ext = splitext(path)
             ext = ext.lower() or ".pdf"
 
+            # Live check: skip if another instance already stored this URL
+            if not force and url_exists_in_qdrant(
+                app_config.qdrant_url, app_config.qdrant_api_key, config_name, url
+            ):
+                counter["skipped"] += 1
+                processed_urls.add(url)
+                _echo(f"  [doc {idx}/{total}] Already in Qdrant: {filename}")
+                return
+
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -513,6 +523,10 @@ async def crawl_external_site(
     all_urls = await parse_sitemaps(config.sitemaps, config.user_agent)
     _echo(f"  Total URLs in sitemap: {len(all_urls)}")
 
+    if not all_urls:
+        _echo("  ERROR: Sitemap returned 0 URLs — aborting to protect existing vectors")
+        return
+
     # 2. Classify URLs
     pages, documents, skipped = classify_urls(all_urls, config)
     _echo(
@@ -617,15 +631,26 @@ async def crawl_external_site(
             all_processed_urls.update(doc_urls)
 
     # 7. Stale detection (only for full crawls, not filtered by pages/docs-only)
+    #    Safety: abort deletion if sitemap looks incomplete (>50% would be removed).
+    STALE_MAX_RATIO = 0.5
     stale_count = 0
     if not pages_only and not docs_only:
         stale = original_existing_urls - all_processed_urls
-        if stale:
-            stale_count = len(stale)
-            _echo(f"\n  Removing {stale_count} stale URLs...")
-            delete_by_source_urls(
-                app_config.qdrant_url, app_config.qdrant_api_key, config.name, stale
-            )
+        if stale and original_existing_urls:
+            ratio = len(stale) / len(original_existing_urls)
+            if ratio > STALE_MAX_RATIO:
+                _echo(
+                    f"\n  WARNING: {len(stale)} stale URLs = {ratio:.0%} of existing vectors"
+                    f" (threshold {STALE_MAX_RATIO:.0%}) — skipping deletion."
+                    f"\n  This usually means the sitemap was incomplete or the crawl"
+                    f" failed partially. Use 'remove-site' to clean up manually if needed."
+                )
+            else:
+                stale_count = len(stale)
+                _echo(f"\n  Removing {stale_count} stale URLs ({ratio:.0%} of existing)...")
+                delete_by_source_urls(
+                    app_config.qdrant_url, app_config.qdrant_api_key, config.name, stale
+                )
 
     _echo(
         f"\n  Done: {total_stored} vectors stored, "

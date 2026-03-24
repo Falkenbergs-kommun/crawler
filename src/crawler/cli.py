@@ -149,6 +149,17 @@ def crawl(ctx: click.Context, collection: str | None, force: bool) -> None:
                         f"{len(stale)} stale")
 
             # Delete stale URLs (pages that no longer exist)
+            # Safety: refuse to delete if >50% would be removed — likely a crawl failure
+            STALE_MAX_RATIO = 0.5
+            if stale and all_existing_urls:
+                ratio = len(stale) / len(all_existing_urls)
+                if ratio > STALE_MAX_RATIO:
+                    click.echo(
+                        f"  WARNING: {len(stale)} stale URLs = {ratio:.0%} of existing"
+                        f" (threshold {STALE_MAX_RATIO:.0%}) — skipping deletion."
+                        f"\n  Likely a crawl failure. Use 'remove-site' to clean up manually."
+                    )
+                    stale = set()  # prevent deletion below
             if stale:
                 click.echo(f"  Removing {len(stale)} stale URLs...")
                 delete_by_source_urls(

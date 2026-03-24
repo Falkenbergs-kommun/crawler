@@ -151,6 +151,23 @@ def get_existing_hashes(
     return result
 
 
+def url_exists_in_qdrant(
+    url: str, api_key: str | None, collection_name: str, source_url: str
+) -> bool:
+    """Check if any point with the given source_url exists in the collection."""
+    client = _make_client(url, api_key)
+    points, _ = client.scroll(
+        collection_name=collection_name,
+        scroll_filter=Filter(
+            must=[FieldCondition(key="source_url", match=MatchValue(value=source_url))]
+        ),
+        with_payload=False,
+        with_vectors=False,
+        limit=1,
+    )
+    return len(points) > 0
+
+
 def delete_by_source_urls(
     url: str, api_key: str | None, collection_name: str, source_urls: set[str]
 ) -> int:
