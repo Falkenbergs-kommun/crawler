@@ -39,6 +39,7 @@ class ExternalSiteConfig:
     delay_between_requests: float = 0.5
     js_rendering: bool = False
     user_agent: str = "FalkenbergKommun-RAG-Bot/1.0"
+    ocr: bool = True
 
 
 @dataclass
@@ -86,6 +87,7 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
             delay_between_requests=ext.get("delay_between_requests", 0.5),
             js_rendering=ext.get("js_rendering", False),
             user_agent=ext.get("user_agent", "FalkenbergKommun-RAG-Bot/1.0"),
+            ocr=ext.get("ocr", True),
         ))
 
     return AppConfig(

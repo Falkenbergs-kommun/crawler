@@ -98,8 +98,8 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 - **embedder.py** — OpenAI `text-embedding-3-large` (3072 dimensions), batched in 100s with exponential backoff retry.
 - **store.py** — Qdrant client wrapper. Uses deterministic UUIDs (`uuid5` from url+chunk_index) for idempotent upserts. Creates payload indexes on `source_url` and `site_name` for filtered queries and site-level deletion. `get_existing_hashes()` scrolls Qdrant to retrieve stored content hashes for diff comparison.
 - **config.py** — Loads `config.yaml` (collections, sites, external_sites) + `.env` (API keys). Config is relative to the YAML file location. Includes `ExternalSiteConfig` for sitemap-based external websites.
-- **external.py** — Pipeline for external websites: sitemap parsing (with gzip/sitemap-index support), URL classification, page fetching (httpx + trafilatura), document fetching (httpx + Docling), and orchestration with incremental sync. Uses dual semaphores for concurrency control.
-- **docling_utils.py** — Shared lazy-loaded Docling `DocumentConverter` instance, used by both `gdrive.py` and `external.py`.
+- **external.py** — Pipeline for external websites: sitemap parsing (with gzip/sitemap-index support), URL classification, page fetching (httpx + trafilatura), document processing (httpx + Docling), and orchestration with incremental sync. Documents are embedded and stored in Qdrant immediately after each Docling conversion (no batching). Uses a pipeline semaphore (4) to limit in-flight documents and memory. All output uses `_echo()` which flushes stdout for nohup compatibility. Pages are still processed in batches (200) since they are fast.
+- **docling_utils.py** — Shared lazy-loaded Docling `DocumentConverter` instances, cached per OCR setting. When `ocr=False`, Docling skips bitmap/OCR processing and only extracts programmatically embedded text — much faster for born-digital PDFs.
 
 ## Key Gotchas
 
@@ -110,11 +110,14 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 
 ## Key Gotchas (External)
 
-- **Docling is CPU-heavy** — `external.py` uses a separate `Semaphore(2)` for Docling conversions to avoid memory exhaustion. Document downloads use the configured `max_concurrent`.
+- **Docling is CPU-heavy** — `external.py` uses a pipeline semaphore (4) to limit how many documents are in-flight simultaneously, keeping memory bounded. Docling's layout analysis (table detection CNN) runs even with OCR disabled and takes 30-200+ seconds per PDF on CPU.
+- **OCR can be disabled per site** — Set `ocr: false` in `config.yaml` for sites with born-digital PDFs (e.g. Skolverket). This skips Docling's RapidOCR stage but layout analysis still runs. Docling with OCR is kept for `gdrive.py` (Google Drive PDFs may be scanned).
+- **stdout buffering with nohup** — All output in `external.py` goes through `_echo()` which calls `click.echo()` + explicit flush. Without this, output is fully buffered when redirected to a file via nohup, making logs appear empty during long runs.
+- **Documents are embedded immediately** — Each document is chunked, embedded, and stored in Qdrant right after Docling conversion. This enables resume on interruption (already-stored docs are detected via content hash and skipped on restart) and provides real-time progress in logs.
 - **Stale detection disabled for partial crawls** — When using `--pages-only` or `--docs-only`, stale vectors are not deleted to avoid removing vectors belonging to the other content type.
 - **Sitemap gzip detection** — Uses URL suffix `.gz`, `Content-Type`, or `Content-Encoding` headers. `httpx` auto-decompresses `Content-Encoding: gzip`, but sitemap files served as `application/gzip` need manual `gzip.decompress()`.
 
 ## Configuration
 
-- `config.yaml` — Defines `collections` (Google Sites) and `external_sites` (sitemap-based websites). Each external site has discovery mode, document/skip extensions, exclude patterns, and rate limiting.
+- `config.yaml` — Defines `collections` (Google Sites) and `external_sites` (sitemap-based websites). Each external site has discovery mode, document/skip extensions, exclude patterns, rate limiting, and `ocr` (bool, default true) to control Docling OCR for document extraction.
 - `.env` — Must contain `OPENAI_API_KEY`. Optionally `QDRANT_URL` (defaults to localhost:6333) and `QDRANT_API_KEY`.

@@ -52,3 +52,4 @@ external_sites:
     delay_between_requests: 0.5
     js_rendering: false
     user_agent: "FalkenbergKommun-RAG-Bot/1.0"
+    ocr: false

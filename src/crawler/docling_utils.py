@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
-# Lazy-initialized docling converter (heavy import, only load when needed)
-_converter = None
+# Lazy-initialized docling converters (heavy import, only load when needed)
+_converters: dict[bool, object] = {}
 
 
-def get_converter():
-    """Return a shared DocumentConverter instance, created on first call."""
-    global _converter
-    if _converter is None:
-        from docling.document_converter import DocumentConverter
-        _converter = DocumentConverter()
-    return _converter
+def get_converter(ocr: bool = True):
+    """Return a shared DocumentConverter instance, created on first call.
+
+    When *ocr* is False, Docling skips all bitmap/OCR processing and only
+    extracts programmatically embedded text — much faster for born-digital PDFs.
+    """
+    if ocr not in _converters:
+        from docling.datamodel.pipeline_options import PdfPipelineOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        pipeline_options = PdfPipelineOptions(do_ocr=ocr)
+        _converters[ocr] = DocumentConverter(
+            format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
+        )
+    return _converters[ocr]

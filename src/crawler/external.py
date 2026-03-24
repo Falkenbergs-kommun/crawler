@@ -6,6 +6,7 @@ import asyncio
 import gzip
 import re
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from posixpath import splitext
@@ -13,6 +14,12 @@ from urllib.parse import urlparse, urlunparse
 
 import click
 import httpx
+
+
+def _echo(msg: str) -> None:
+    """click.echo with forced flush for nohup/redirect compatibility."""
+    click.echo(msg)
+    click.get_text_stream("stdout").flush()
 
 from .chunker import Chunk, chunk_page, content_hash
 from .config import AppConfig, ExternalSiteConfig
@@ -26,6 +33,10 @@ from .store import (
 )
 
 _SM_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+# Batch sizes for streaming processing — each batch is fully embedded and
+# stored before the next begins, keeping memory bounded and enabling resume.
+PAGE_BATCH_SIZE = 200
 
 # ---------------------------------------------------------------------------
 # 2a. Sitemap parser
@@ -62,7 +73,7 @@ async def _parse_sitemap_recursive(
             resp = await client.get(url)
             resp.raise_for_status()
         except Exception as e:
-            click.echo(f"  Warning: failed to fetch sitemap {url}: {e}")
+            _echo(f"  Warning: failed to fetch sitemap {url}: {e}")
             continue
 
         # Decompress gzip if needed
@@ -76,7 +87,7 @@ async def _parse_sitemap_recursive(
             try:
                 data = gzip.decompress(data)
             except Exception as e:
-                click.echo(f"  Warning: failed to decompress {url}: {e}")
+                _echo(f"  Warning: failed to decompress {url}: {e}")
                 continue
 
         xml_text = data.decode("utf-8", errors="replace")
@@ -84,7 +95,7 @@ async def _parse_sitemap_recursive(
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError as e:
-            click.echo(f"  Warning: failed to parse XML from {url}: {e}")
+            _echo(f"  Warning: failed to parse XML from {url}: {e}")
             continue
 
         tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
@@ -95,7 +106,7 @@ async def _parse_sitemap_recursive(
             for sitemap_el in root.findall("sm:sitemap/sm:loc", _SM_NS):
                 if sitemap_el.text:
                     child_urls.append(sitemap_el.text.strip())
-            click.echo(f"  Sitemap index: {len(child_urls)} child sitemaps")
+            _echo(f"  Sitemap index: {len(child_urls)} child sitemaps")
             await _parse_sitemap_recursive(client, child_urls, result)
 
         elif tag == "urlset":
@@ -111,7 +122,7 @@ async def _parse_sitemap_recursive(
                     if loc_url not in result or (lm and (result[loc_url] is None or lm > result[loc_url])):
                         result[loc_url] = lm
                     count += 1
-            click.echo(f"  Parsed {count} URLs from {url.split('/')[-1]}")
+            _echo(f"  Parsed {count} URLs from {url.split('/')[-1]}")
 
 
 # ---------------------------------------------------------------------------
@@ -182,19 +193,21 @@ def _normalize_url(url: str) -> str:
 async def fetch_pages(
     urls: dict[str, str | None],
     config: ExternalSiteConfig,
+    counter_offset: int = 0,
+    total_override: int | None = None,
 ) -> list[PageResult]:
     """Fetch web pages with httpx and extract text with trafilatura."""
     import trafilatura
 
     results: list[PageResult] = []
     sem = asyncio.Semaphore(config.max_concurrent)
-    total = len(urls)
+    total = total_override or len(urls)
     counter = {"done": 0, "failed": 0}
 
     async def _fetch_one(client: httpx.AsyncClient, url: str) -> None:
         async with sem:
             counter["done"] += 1
-            idx = counter["done"]
+            idx = counter_offset + counter["done"]
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -221,14 +234,14 @@ async def fetch_pages(
                     ))
 
                 if idx % 100 == 0 or idx == total:
-                    click.echo(f"  [page {idx}/{total}] {counter['failed']} failed so far")
+                    _echo(f"  [page {idx}/{total}] {counter['failed']} failed so far")
 
             except Exception as e:
                 counter["failed"] += 1
                 if counter["failed"] <= 10:
-                    click.echo(f"  [page {idx}/{total}] Failed: {url} — {e}")
+                    _echo(f"  [page {idx}/{total}] Failed: {url} — {e}")
                 elif counter["failed"] == 11:
-                    click.echo("  (suppressing further page errors)")
+                    _echo("  (suppressing further page errors)")
 
             await asyncio.sleep(config.delay_between_requests)
 
@@ -240,7 +253,7 @@ async def fetch_pages(
         tasks = [_fetch_one(client, url) for url in urls]
         await asyncio.gather(*tasks)
 
-    click.echo(f"  Pages: {len(results)} OK, {counter['failed']} failed")
+    _echo(f"  Pages: {len(results)} OK, {counter['failed']} failed")
     return results
 
 
@@ -249,79 +262,130 @@ async def fetch_pages(
 # ---------------------------------------------------------------------------
 
 
-async def fetch_documents(
+async def process_documents(
     urls: dict[str, str | None],
     config: ExternalSiteConfig,
-) -> list[PageResult]:
-    """Download documents and extract text with Docling."""
+    config_name: str,
+    app_config: AppConfig,
+    existing_hashes: dict[str, str],
+    force: bool = False,
+) -> tuple[int, int, set[str]]:
+    """Download, convert, embed and store documents one by one.
+
+    Each document is embedded and stored in Qdrant immediately after Docling
+    conversion — no batching delay.
+
+    Returns (total_vectors_stored, total_skipped, processed_urls).
+    """
     from .docling_utils import get_converter
 
-    results: list[PageResult] = []
-    download_sem = asyncio.Semaphore(config.max_concurrent)
-    convert_sem = asyncio.Semaphore(2)  # Docling is CPU-heavy
+    # Pipeline semaphore: limits how many documents are in-flight (downloaded
+    # and waiting for or undergoing conversion).  Keeps memory bounded —
+    # without this, asyncio.gather would download thousands of PDFs into RAM
+    # while only 2 can convert at a time.
+    pipeline_sem = asyncio.Semaphore(4)
     total = len(urls)
-    counter = {"done": 0, "failed": 0}
+    counter = {"done": 0, "failed": 0, "stored": 0, "skipped": 0}
+    processed_urls: set[str] = set()
     max_size = 50 * 1024 * 1024  # 50 MB
 
-    converter = get_converter()
+    converter = get_converter(ocr=config.ocr)
 
     async def _process_one(client: httpx.AsyncClient, url: str) -> None:
-        counter["done"] += 1
-        idx = counter["done"]
+        async with pipeline_sem:
+            counter["done"] += 1
+            idx = counter["done"]
 
-        # Extract filename and extension
-        path = urlparse(url).path
-        filename = path.split("/")[-1] or "document"
-        _, ext = splitext(path)
-        ext = ext.lower() or ".pdf"
+            # Extract filename and extension
+            path = urlparse(url).path
+            filename = path.split("/")[-1] or "document"
+            _, ext = splitext(path)
+            ext = ext.lower() or ".pdf"
 
-        async with download_sem:
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
             except Exception as e:
                 counter["failed"] += 1
                 if counter["failed"] <= 10:
-                    click.echo(f"  [doc {idx}/{total}] Download failed: {filename} — {e}")
+                    _echo(f"  [doc {idx}/{total}] Download failed: {filename} — {e}")
                 return
             finally:
                 await asyncio.sleep(config.delay_between_requests)
 
-        data = resp.content
-        size_mb = len(data) / (1024 * 1024)
+            data = resp.content
+            size_mb = len(data) / (1024 * 1024)
 
-        if len(data) > max_size:
-            click.echo(f"  [doc {idx}/{total}] Skipping {filename} ({size_mb:.1f} MB > 50 MB)")
-            return
+            if len(data) > max_size:
+                _echo(f"  [doc {idx}/{total}] Skipping {filename} ({size_mb:.1f} MB > 50 MB)")
+                return
 
-        if idx % 50 == 0 or idx == total:
-            click.echo(f"  [doc {idx}/{total}] Processing: {filename} ({size_mb:.1f} MB)")
+            _echo(f"  [doc {idx}/{total}] Converting: {filename} ({size_mb:.1f} MB)")
 
-        # Write to temp file and convert with Docling
-        async with convert_sem:
+            # Write to temp file and convert with Docling
+            t0 = time.monotonic()
             try:
                 text = await asyncio.to_thread(_convert_document, converter, data, ext)
             except Exception as e:
                 counter["failed"] += 1
                 if counter["failed"] <= 10:
-                    click.echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {e}")
+                    _echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {e}")
                 return
 
-        if text and text.strip():
-            # Title: first non-empty line from markdown, or filename
+            elapsed = time.monotonic() - t0
+
+            if not text or not text.strip():
+                _echo(f"  [doc {idx}/{total}] Empty: {filename} — no text extracted, {elapsed:.1f}s")
+                return
+
+            text = text.strip()
+            processed_urls.add(url)
+
+            # Hash check
+            h = content_hash(text)
+            if not force and url in existing_hashes and existing_hashes[url] == h:
+                counter["skipped"] += 1
+                _echo(f"  [doc {idx}/{total}] Unchanged: {filename}, {elapsed:.1f}s")
+                return
+
+            # Title from first line
             lines = [l.strip().lstrip("#").strip() for l in text.split("\n") if l.strip()]
             title = lines[0][:150] if lines else filename
-
             doc_format = ext.lstrip(".")
-            results.append(PageResult(
-                url=url,
-                title=title,
-                markdown=text.strip(),
-                raw_html="",
-                external_links=[],
-            ))
-            # Store document_format in a way the orchestrator can pick up
-            results[-1]._doc_format = doc_format  # type: ignore[attr-defined]
+
+            # Delete old vectors if this URL changed
+            if url in existing_hashes:
+                delete_by_source_urls(
+                    app_config.qdrant_url, app_config.qdrant_api_key, config_name, {url}
+                )
+
+            # Chunk, embed, store
+            chunks = chunk_page(
+                markdown=text,
+                source_url=url,
+                page_title=title,
+                site_name=config_name,
+            )
+            for c in chunks:
+                c.metadata.update({
+                    "content_type": "document",
+                    "document_format": doc_format,
+                    "sitemap_lastmod": urls.get(url),
+                })
+
+            texts = [c.text for c in chunks]
+            embeddings = await asyncio.to_thread(embed_texts, texts, app_config.openai_api_key)
+
+            count = upsert_chunks(
+                app_config.qdrant_url, app_config.qdrant_api_key, config_name, chunks, embeddings
+            )
+            counter["stored"] += count
+            existing_hashes[url] = h
+
+            _echo(
+                f"  [doc {idx}/{total}] Stored: {filename} — "
+                f"{len(chunks)} chunks, {len(text)} chars, {elapsed:.1f}s"
+            )
 
     async with httpx.AsyncClient(
         headers={"User-Agent": config.user_agent},
@@ -331,8 +395,11 @@ async def fetch_documents(
         tasks = [_process_one(client, url) for url in urls]
         await asyncio.gather(*tasks)
 
-    click.echo(f"  Documents: {len(results)} OK, {counter['failed']} failed")
-    return results
+    _echo(
+        f"  Documents done: {counter['stored']} vectors stored, "
+        f"{counter['skipped']} unchanged, {counter['failed']} failed"
+    )
+    return counter["stored"], counter["skipped"], processed_urls
 
 
 def _convert_document(converter, data: bytes, ext: str) -> str:
@@ -348,7 +415,78 @@ def _convert_document(converter, data: bytes, ext: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 2e. Orchestrator
+# 2e. Batch embed + store helper
+# ---------------------------------------------------------------------------
+
+
+def _embed_and_store_batch(
+    items: list[dict],
+    existing_hashes: dict[str, str],
+    config_name: str,
+    app_config: AppConfig,
+    force: bool,
+) -> tuple[int, int]:
+    """Hash-check, chunk, embed, and store a batch of content items.
+
+    Each item dict has keys: url, markdown, title, extra_meta.
+    Returns (vectors_stored, items_skipped_unchanged).
+    Mutates *existing_hashes* in-place to record newly stored hashes.
+    """
+    new_or_changed: list[dict] = []
+    skipped = 0
+
+    for item in items:
+        h = content_hash(item["markdown"])
+        if not force and item["url"] in existing_hashes and existing_hashes[item["url"]] == h:
+            skipped += 1
+            continue
+        item["_hash"] = h
+        new_or_changed.append(item)
+
+    if not new_or_changed:
+        return 0, skipped
+
+    # Delete old vectors for changed URLs before re-upserting
+    changed_urls = {it["url"] for it in new_or_changed if it["url"] in existing_hashes}
+    if changed_urls:
+        delete_by_source_urls(
+            app_config.qdrant_url, app_config.qdrant_api_key, config_name, changed_urls
+        )
+
+    # Chunk
+    all_chunks: list[Chunk] = []
+    for item in new_or_changed:
+        chunks = chunk_page(
+            markdown=item["markdown"],
+            source_url=item["url"],
+            page_title=item["title"],
+            site_name=config_name,
+        )
+        for c in chunks:
+            c.metadata.update(item["extra_meta"])
+        all_chunks.extend(chunks)
+
+    if not all_chunks:
+        return 0, skipped
+
+    # Embed
+    texts = [c.text for c in all_chunks]
+    embeddings = embed_texts(texts, app_config.openai_api_key)
+
+    # Store
+    count = upsert_chunks(
+        app_config.qdrant_url, app_config.qdrant_api_key, config_name, all_chunks, embeddings
+    )
+
+    # Update existing_hashes so subsequent batches detect already-stored content
+    for item in new_or_changed:
+        existing_hashes[item["url"]] = item["_hash"]
+
+    return count, skipped
+
+
+# ---------------------------------------------------------------------------
+# 2f. Orchestrator
 # ---------------------------------------------------------------------------
 
 
@@ -359,19 +497,25 @@ async def crawl_external_site(
     pages_only: bool = False,
     docs_only: bool = False,
 ) -> None:
-    """Run the full pipeline for an external website."""
+    """Run the full pipeline for an external website.
+
+    Processes content in streaming batches to limit memory usage. Each batch
+    is embedded and stored before the next begins, so interrupted runs can
+    be resumed efficiently — already-stored vectors are detected via
+    content-hash comparison and skipped.
+    """
 
     if config.discovery != "sitemap":
         raise NotImplementedError("crawl discovery not yet implemented")
 
     # 1. Parse sitemaps
-    click.echo("Fetching sitemaps...")
+    _echo("Fetching sitemaps...")
     all_urls = await parse_sitemaps(config.sitemaps, config.user_agent)
-    click.echo(f"  Total URLs in sitemap: {len(all_urls)}")
+    _echo(f"  Total URLs in sitemap: {len(all_urls)}")
 
     # 2. Classify URLs
     pages, documents, skipped = classify_urls(all_urls, config)
-    click.echo(
+    _echo(
         f"  {config.name}: {len(pages)} pages, {len(documents)} documents, {skipped} skipped"
     )
 
@@ -388,125 +532,102 @@ async def crawl_external_site(
     existing_hashes = get_existing_hashes(
         app_config.qdrant_url, app_config.qdrant_api_key, config.name, config.name
     )
-    click.echo(f"  Existing vectors in Qdrant: {len(existing_hashes)}")
+    _echo(f"  Existing vectors in Qdrant: {len(existing_hashes)}")
 
-    # 5. Fetch pages
-    page_results: list[PageResult] = []
+    # Snapshot for stale detection (before we mutate existing_hashes via batches)
+    original_existing_urls = set(existing_hashes.keys())
+
+    total_stored = 0
+    total_skipped = 0
+    # Track successfully processed URLs for stale detection
+    all_processed_urls: set[str] = set()
+
+    # 5. Process pages in batches
     if pages:
-        click.echo(f"\nFetching {len(pages)} web pages...")
-        page_results = await fetch_pages(pages, config)
+        page_url_list = list(pages.keys())
+        total_pages = len(page_url_list)
+        num_batches = (total_pages - 1) // PAGE_BATCH_SIZE + 1
+        _echo(f"\nProcessing {total_pages} web pages ({num_batches} batches)...")
 
-    # 6. Fetch documents
-    doc_results: list[PageResult] = []
+        for batch_start in range(0, total_pages, PAGE_BATCH_SIZE):
+            batch_urls = {
+                u: pages[u]
+                for u in page_url_list[batch_start : batch_start + PAGE_BATCH_SIZE]
+            }
+            batch_num = batch_start // PAGE_BATCH_SIZE + 1
+
+            page_results = await fetch_pages(
+                batch_urls,
+                config,
+                counter_offset=batch_start,
+                total_override=total_pages,
+            )
+
+            items = [
+                {
+                    "url": p.url,
+                    "markdown": p.markdown,
+                    "title": p.title,
+                    "extra_meta": {
+                        "content_type": "page",
+                        "document_format": None,
+                        "sitemap_lastmod": pages.get(p.url),
+                    },
+                }
+                for p in page_results
+            ]
+
+            stored, skipped_batch = _embed_and_store_batch(
+                items, existing_hashes, config.name, app_config, force
+            )
+            total_stored += stored
+            total_skipped += skipped_batch
+            all_processed_urls.update(p.url for p in page_results)
+
+            _echo(
+                f"  Page batch {batch_num}/{num_batches}: "
+                f"{stored} vectors stored, {skipped_batch} unchanged"
+            )
+
+    # 6. Process documents (each doc is embedded+stored immediately after conversion)
     if documents:
-        click.echo(f"\nProcessing {len(documents)} documents...")
-        doc_results = await fetch_documents(documents, config)
+        # Pre-filter: skip documents already in Qdrant for fast resume.
+        # Documents (PDF/DOCX/PPTX) rarely change, so re-downloading just
+        # to verify the hash is wasteful.  Use --force to re-check everything.
+        if not force:
+            already_stored = set(documents.keys()) & set(existing_hashes.keys())
+            if already_stored:
+                _echo(
+                    f"\n  Skipping {len(already_stored)} documents already in Qdrant"
+                )
+                all_processed_urls.update(already_stored)
+                total_skipped += len(already_stored)
+                documents = {
+                    u: lm for u, lm in documents.items() if u not in already_stored
+                }
 
-    # 7. Build page_content dict and crawled_hashes
-    page_content: dict[str, dict] = {}
-    crawled_hashes: dict[str, str] = {}
+        if documents:
+            _echo(f"\nProcessing {len(documents)} new documents...")
 
-    for page in page_results:
-        h = content_hash(page.markdown)
-        crawled_hashes[page.url] = h
-        page_content[page.url] = {
-            "markdown": page.markdown,
-            "title": page.title,
-            "extra_meta": {
-                "content_type": "page",
-                "document_format": None,
-                "sitemap_lastmod": pages.get(page.url),
-            },
-        }
+            doc_stored, doc_skipped, doc_urls = await process_documents(
+                documents, config, config.name, app_config, existing_hashes, force
+            )
+            total_stored += doc_stored
+            total_skipped += doc_skipped
+            all_processed_urls.update(doc_urls)
 
-    for doc in doc_results:
-        h = content_hash(doc.markdown)
-        crawled_hashes[doc.url] = h
-        doc_format = getattr(doc, "_doc_format", None)
-        page_content[doc.url] = {
-            "markdown": doc.markdown,
-            "title": doc.title,
-            "extra_meta": {
-                "content_type": "document",
-                "document_format": doc_format,
-                "sitemap_lastmod": documents.get(doc.url),
-            },
-        }
-
-    # 8. Content-hash diff against Qdrant
-    all_crawled_urls = set(crawled_hashes.keys())
-    all_existing_urls = set(existing_hashes.keys())
-
-    if force:
-        changed_or_new = all_crawled_urls
-        unchanged: set[str] = set()
-    else:
-        unchanged = {
-            url
-            for url in all_crawled_urls & all_existing_urls
-            if crawled_hashes[url] == existing_hashes[url]
-        }
-        changed_or_new = all_crawled_urls - unchanged
-
-    # Only mark stale if we crawled the full set (not filtered by pages/docs-only)
+    # 7. Stale detection (only for full crawls, not filtered by pages/docs-only)
+    stale_count = 0
     if not pages_only and not docs_only:
-        stale = all_existing_urls - all_crawled_urls
-    else:
-        stale = set()
+        stale = original_existing_urls - all_processed_urls
+        if stale:
+            stale_count = len(stale)
+            _echo(f"\n  Removing {stale_count} stale URLs...")
+            delete_by_source_urls(
+                app_config.qdrant_url, app_config.qdrant_api_key, config.name, stale
+            )
 
-    click.echo(
-        f"\n  {len(all_crawled_urls)} URLs crawled: "
-        f"{len(unchanged)} unchanged, {len(changed_or_new)} new/changed, "
-        f"{len(stale)} stale"
+    _echo(
+        f"\n  Done: {total_stored} vectors stored, "
+        f"{total_skipped} unchanged, {stale_count} stale removed"
     )
-
-    # 9. Delete stale URLs
-    if stale:
-        click.echo(f"  Removing {len(stale)} stale URLs...")
-        delete_by_source_urls(
-            app_config.qdrant_url, app_config.qdrant_api_key, config.name, stale
-        )
-
-    if not changed_or_new:
-        click.echo("  Nothing to update.")
-        return
-
-    # Delete old vectors for changed URLs before re-upserting
-    changed_existing = changed_or_new & all_existing_urls
-    if changed_existing:
-        click.echo(f"  Removing {len(changed_existing)} changed URLs for re-embedding...")
-        delete_by_source_urls(
-            app_config.qdrant_url, app_config.qdrant_api_key, config.name, changed_existing
-        )
-
-    # 10. Chunk
-    click.echo("  Chunking...")
-    all_chunks: list[Chunk] = []
-    for source_url in sorted(changed_or_new):
-        content = page_content[source_url]
-        chunks = chunk_page(
-            markdown=content["markdown"],
-            source_url=source_url,
-            page_title=content["title"],
-            site_name=config.name,
-        )
-        for c in chunks:
-            c.metadata.update(content["extra_meta"])
-        all_chunks.extend(chunks)
-
-    click.echo(f"  {len(all_chunks)} chunks to embed")
-
-    if not all_chunks:
-        return
-
-    # 11. Embed
-    click.echo("  Generating embeddings...")
-    texts = [c.text for c in all_chunks]
-    embeddings = embed_texts(texts, app_config.openai_api_key)
-
-    # 12. Store
-    click.echo("  Storing in Qdrant...")
-    count = upsert_chunks(
-        app_config.qdrant_url, app_config.qdrant_api_key, config.name, all_chunks, embeddings
-    )
-    click.echo(f"  Stored {count} vectors in '{config.name}'")
