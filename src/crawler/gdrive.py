@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import io
 import re
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import click
 import httpx
-from pdfminer.high_level import extract_text as pdf_extract_text
 
 # Patterns for extracting Google document IDs
 _DRIVE_FILE_RE = re.compile(
@@ -129,24 +129,64 @@ def _download_google_slides(doc_id: str) -> str:
     return text
 
 
+_CONTENT_TYPE_TO_EXT: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword": ".doc",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.ms-powerpoint": ".ppt",
+    "text/csv": ".csv",
+    "text/plain": ".txt",
+    "text/html": ".html",
+}
+
+# Lazy-initialized docling converter (heavy import, only load when needed)
+_converter = None
+
+
+def _get_converter():
+    global _converter
+    if _converter is None:
+        from docling.document_converter import DocumentConverter
+        _converter = DocumentConverter()
+    return _converter
+
+
+def _guess_extension(content_type: str) -> str:
+    """Map content-type header to file extension for docling."""
+    base = content_type.split(";")[0].strip().lower()
+    return _CONTENT_TYPE_TO_EXT.get(base, ".pdf")
+
+
 def _download_drive_file(doc_id: str) -> str:
-    """Download a Drive file and extract text. Handles PDFs and text files."""
+    """Download a Drive file and extract text using docling.
+
+    Supports PDF, Word, Excel, PowerPoint, and other formats.
+    OCR is applied automatically for scanned PDFs and images.
+    """
     url = f"https://drive.google.com/uc?export=download&id={doc_id}"
     resp = httpx.get(url, follow_redirects=True, timeout=60)
     resp.raise_for_status()
 
     content_type = resp.headers.get("content-type", "")
 
-    if "pdf" in content_type:
-        return pdf_extract_text(io.BytesIO(resp.content))
-    elif "text" in content_type or "csv" in content_type:
+    # Plain text/CSV can be returned directly without docling
+    if "text/plain" in content_type or "text/csv" in content_type:
         return resp.text
-    else:
-        # Try PDF extraction as fallback (many Drive files are PDFs)
-        try:
-            return pdf_extract_text(io.BytesIO(resp.content))
-        except Exception:
-            return ""
+
+    ext = _guess_extension(content_type)
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(resp.content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        converter = _get_converter()
+        result = converter.convert(tmp_path)
+        return result.document.export_to_markdown()
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _fetch_youtube_metadata(video_id: str) -> tuple[str, str]:

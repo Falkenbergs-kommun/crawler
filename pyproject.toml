@@ -13,8 +13,8 @@ dependencies = [
     "click>=8.0",
     "pyyaml",
     "python-dotenv",
-    "pdfminer.six",
     "httpx",
+    "docling>=2.81.0",
 ]
 
 [project.scripts]
