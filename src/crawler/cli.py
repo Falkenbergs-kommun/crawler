@@ -126,21 +126,22 @@ def crawl(ctx: click.Context, collection: str | None, force: bool) -> None:
                     }
 
             # Diff against existing hashes in Qdrant
-            if force:
-                existing_hashes: dict[str, str] = {}
-            else:
-                existing_hashes = get_existing_hashes(
-                    cfg.qdrant_url, cfg.qdrant_api_key, coll.name, site.url
-                )
+            existing_hashes = get_existing_hashes(
+                cfg.qdrant_url, cfg.qdrant_api_key, coll.name, site.url
+            )
 
             all_crawled_urls = set(crawled_hashes.keys())
             all_existing_urls = set(existing_hashes.keys())
 
-            unchanged = {
-                url for url in all_crawled_urls & all_existing_urls
-                if crawled_hashes[url] == existing_hashes[url]
-            }
-            changed_or_new = all_crawled_urls - unchanged
+            if force:
+                changed_or_new = all_crawled_urls
+                unchanged: set[str] = set()
+            else:
+                unchanged = {
+                    url for url in all_crawled_urls & all_existing_urls
+                    if crawled_hashes[url] == existing_hashes[url]
+                }
+                changed_or_new = all_crawled_urls - unchanged
             stale = all_existing_urls - all_crawled_urls
 
             click.echo(f"  {len(all_crawled_urls)} URLs crawled: "

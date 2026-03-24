@@ -143,9 +143,8 @@ def get_existing_hashes(
         )
         for p in points:
             src = p.payload.get("source_url", "")
-            h = p.payload.get("content_hash", "")
-            if src and h:
-                result[src] = h
+            if src:
+                result[src] = p.payload.get("content_hash", "")
         if offset is None:
             break
 
