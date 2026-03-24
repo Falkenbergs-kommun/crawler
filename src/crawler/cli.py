@@ -200,6 +200,49 @@ def crawl(ctx: click.Context, collection: str | None, force: bool) -> None:
     click.echo("\nDone.")
 
 
+@cli.command("crawl-external")
+@click.option("--site", default=None, help="Only crawl this external site (by name)")
+@click.option("--force", is_flag=True, help="Force re-embedding, ignore hashes and lastmod")
+@click.option("--pages-only", is_flag=True, help="Only crawl web pages, skip documents")
+@click.option("--docs-only", is_flag=True, help="Only crawl documents, skip web pages")
+@click.pass_context
+def crawl_external(ctx: click.Context, site: str | None, force: bool, pages_only: bool, docs_only: bool) -> None:
+    """Crawl external websites defined in config and index to Qdrant."""
+    from .external import crawl_external_site
+
+    cfg = load_config(ctx.obj["config_path"])
+
+    if not cfg.external_sites:
+        click.echo("No external_sites defined in config.")
+        raise SystemExit(1)
+
+    sites = cfg.external_sites
+    if site:
+        sites = [s for s in sites if s.name == site]
+        if not sites:
+            click.echo(f"External site '{site}' not found in config.")
+            raise SystemExit(1)
+
+    if pages_only and docs_only:
+        click.echo("Cannot use --pages-only and --docs-only together.")
+        raise SystemExit(1)
+
+    for ext_site in sites:
+        click.echo(f"\n{'='*60}")
+        click.echo(f"External site: {ext_site.name}")
+        click.echo(f"{'='*60}")
+
+        asyncio.run(crawl_external_site(
+            config=ext_site,
+            app_config=cfg,
+            force=force,
+            pages_only=pages_only,
+            docs_only=docs_only,
+        ))
+
+    click.echo("\nDone.")
+
+
 @cli.command("list")
 @click.pass_context
 def list_cmd(ctx: click.Context) -> None:

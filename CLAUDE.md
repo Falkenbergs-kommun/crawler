@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Web crawler that indexes Swedish municipality Google Sites into Qdrant vector collections for RAG. It crawls JS-rendered pages, extracts linked Google Docs/Sheets/Slides/Drive PDFs and YouTube metadata, chunks the content, generates OpenAI embeddings, and upserts to Qdrant.
+Web crawler that indexes Swedish municipality Google Sites and external websites into Qdrant vector collections for RAG. It crawls JS-rendered pages, extracts linked Google Docs/Sheets/Slides/Drive PDFs and YouTube metadata, chunks the content, generates OpenAI embeddings, and upserts to Qdrant. External websites (e.g. Skolverket) are discovered via sitemap parsing and use httpx + trafilatura for pages and Docling for documents (PDF/DOCX/PPTX).
 
 ## Setup
 
@@ -69,6 +69,20 @@ uv run crawler remove-site --collection <name> --url <site-url>
 
 # Use a different config file
 uv run crawler --config path/to/config.yaml crawl
+
+# --- External websites (sitemap-based) ---
+
+# Crawl all external sites (pages + documents)
+uv run crawler crawl-external
+
+# Crawl only web pages for a specific site
+uv run crawler crawl-external --site skolverket --pages-only
+
+# Crawl only documents (PDF/DOCX/PPTX) — heavy, run with nohup
+nohup uv run crawler crawl-external --site skolverket --docs-only > crawl-docs.log 2>&1 &
+
+# Force re-embedding of all content
+uv run crawler crawl-external --site skolverket --force
 ```
 
 No test suite exists yet.
@@ -83,7 +97,9 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 - **chunker.py** — Token-aware splitting with `langchain-text-splitters` using `cl100k_base` tokenizer (512 tokens, 100 overlap). Each chunk carries metadata: source_url, page_title, site_name, chunk_index, crawl_date, content_hash.
 - **embedder.py** — OpenAI `text-embedding-3-large` (3072 dimensions), batched in 100s with exponential backoff retry.
 - **store.py** — Qdrant client wrapper. Uses deterministic UUIDs (`uuid5` from url+chunk_index) for idempotent upserts. Creates payload indexes on `source_url` and `site_name` for filtered queries and site-level deletion. `get_existing_hashes()` scrolls Qdrant to retrieve stored content hashes for diff comparison.
-- **config.py** — Loads `config.yaml` (collections and sites) + `.env` (API keys). Config is relative to the YAML file location.
+- **config.py** — Loads `config.yaml` (collections, sites, external_sites) + `.env` (API keys). Config is relative to the YAML file location. Includes `ExternalSiteConfig` for sitemap-based external websites.
+- **external.py** — Pipeline for external websites: sitemap parsing (with gzip/sitemap-index support), URL classification, page fetching (httpx + trafilatura), document fetching (httpx + Docling), and orchestration with incremental sync. Uses dual semaphores for concurrency control.
+- **docling_utils.py** — Shared lazy-loaded Docling `DocumentConverter` instance, used by both `gdrive.py` and `external.py`.
 
 ## Key Gotchas
 
@@ -92,7 +108,13 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 - **Google Sites timeouts** — Some pages are JS-heavy; `page_timeout` is set to 60s with a 3s `delay_before_return_html` for rendering.
 - **Content from multiple sources** — A single site crawl produces chunks from: the page itself, linked Google Docs/Sheets/Slides, Drive PDFs, and YouTube video metadata. The `content_type` and `linked_from` metadata fields distinguish these.
 
+## Key Gotchas (External)
+
+- **Docling is CPU-heavy** — `external.py` uses a separate `Semaphore(2)` for Docling conversions to avoid memory exhaustion. Document downloads use the configured `max_concurrent`.
+- **Stale detection disabled for partial crawls** — When using `--pages-only` or `--docs-only`, stale vectors are not deleted to avoid removing vectors belonging to the other content type.
+- **Sitemap gzip detection** — Uses URL suffix `.gz`, `Content-Type`, or `Content-Encoding` headers. `httpx` auto-decompresses `Content-Encoding: gzip`, but sitemap files served as `application/gzip` need manual `gzip.decompress()`.
+
 ## Configuration
 
-- `config.yaml` — Defines collections, each with one or more sites (url, max_depth, allowed_domains, url_filter)
+- `config.yaml` — Defines `collections` (Google Sites) and `external_sites` (sitemap-based websites). Each external site has discovery mode, document/skip extensions, exclude patterns, and rate limiting.
 - `.env` — Must contain `OPENAI_API_KEY`. Optionally `QDRANT_URL` (defaults to localhost:6333) and `QDRANT_API_KEY`.

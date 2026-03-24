@@ -22,3 +22,33 @@ collections:
         allowed_domains:
           - "sites.google.com"
         url_filter: "/falkenberg.se/bufdigitalisering/"
+
+external_sites:
+  - name: "skolverket"
+    base_url: "https://www.skolverket.se"
+    discovery: "sitemap"
+    sitemaps:
+      - "https://www.skolverket.se/sitemapindex.xml"
+    document_extensions:
+      - ".pdf"
+      - ".docx"
+      - ".doc"
+      - ".pptx"
+    skip_extensions:
+      - ".png"
+      - ".jpg"
+      - ".jpeg"
+      - ".gif"
+      - ".webp"
+      - ".svg"
+      - ".zip"
+      - ".xlsx"
+      - ".xls"
+      - ".xlsm"
+      - ".srt"
+    exclude_patterns:
+      - "^https://www\\.skolverket\\.se/images/"
+    max_concurrent: 5
+    delay_between_requests: 0.5
+    js_rendering: false
+    user_agent: "FalkenbergKommun-RAG-Bot/1.0"

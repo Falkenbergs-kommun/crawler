@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv",
     "httpx",
     "docling>=2.81.0",
+    "trafilatura>=2.0",
 ]
 
 [project.scripts]

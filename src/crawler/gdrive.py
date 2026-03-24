@@ -142,16 +142,7 @@ _CONTENT_TYPE_TO_EXT: dict[str, str] = {
     "text/html": ".html",
 }
 
-# Lazy-initialized docling converter (heavy import, only load when needed)
-_converter = None
-
-
-def _get_converter():
-    global _converter
-    if _converter is None:
-        from docling.document_converter import DocumentConverter
-        _converter = DocumentConverter()
-    return _converter
+from .docling_utils import get_converter as _get_converter
 
 
 def _guess_extension(content_type: str) -> str:
