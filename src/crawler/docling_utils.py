@@ -6,6 +6,16 @@ from __future__ import annotations
 _converters: dict[bool, object] = {}
 
 
+def _create_converter(ocr: bool):
+    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.document_converter import DocumentConverter, PdfFormatOption
+
+    pipeline_options = PdfPipelineOptions(do_ocr=ocr)
+    return DocumentConverter(
+        format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
+    )
+
+
 def get_converter(ocr: bool = True):
     """Return a shared DocumentConverter instance, created on first call.
 
@@ -13,11 +23,12 @@ def get_converter(ocr: bool = True):
     extracts programmatically embedded text — much faster for born-digital PDFs.
     """
     if ocr not in _converters:
-        from docling.datamodel.pipeline_options import PdfPipelineOptions
-        from docling.document_converter import DocumentConverter, PdfFormatOption
+        _converters[ocr] = _create_converter(ocr)
+    return _converters[ocr]
 
-        pipeline_options = PdfPipelineOptions(do_ocr=ocr)
-        _converters[ocr] = DocumentConverter(
-            format_options={"pdf": PdfFormatOption(pipeline_options=pipeline_options)}
-        )
+
+def reset_converter(ocr: bool = True):
+    """Discard and recreate the converter to free accumulated memory."""
+    _converters.pop(ocr, None)
+    _converters[ocr] = _create_converter(ocr)
     return _converters[ocr]

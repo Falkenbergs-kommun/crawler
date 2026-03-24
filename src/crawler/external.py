@@ -271,145 +271,175 @@ async def process_documents(
     existing_hashes: dict[str, str],
     force: bool = False,
 ) -> tuple[int, int, set[str]]:
-    """Download, convert, embed and store documents one by one.
+    """Download, convert, embed and store documents sequentially.
 
-    Each document is embedded and stored in Qdrant immediately after Docling
-    conversion — no batching delay.
+    Processes one document at a time to keep memory bounded.  All
+    intermediate data (PDF bytes, extracted text, chunks, embeddings)
+    is released before moving to the next document.  The Docling
+    converter is recreated every CONVERTER_RESET_INTERVAL documents
+    to free accumulated internal state.
 
     Returns (total_vectors_stored, total_skipped, processed_urls).
     """
-    from .docling_utils import get_converter
+    from .docling_utils import get_converter, reset_converter
 
-    # Pipeline semaphore: limits how many documents are in-flight (downloaded
-    # and waiting for or undergoing conversion).  Keeps memory bounded —
-    # without this, asyncio.gather would download thousands of PDFs into RAM
-    # while only 2 can convert at a time.
-    pipeline_sem = asyncio.Semaphore(4)
+    CONVERT_TIMEOUT = 600  # seconds — skip document if Docling takes longer
+    CONVERTER_RESET_INTERVAL = 50  # recreate converter to free memory
+    MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+
     total = len(urls)
-    counter = {"done": 0, "failed": 0, "stored": 0, "skipped": 0}
+    stored_total = 0
+    skipped = 0
+    failed = 0
+    converted_since_reset = 0
     processed_urls: set[str] = set()
-    max_size = 50 * 1024 * 1024  # 50 MB
 
     converter = get_converter(ocr=config.ocr)
-
-    async def _process_one(client: httpx.AsyncClient, url: str) -> None:
-        async with pipeline_sem:
-            counter["done"] += 1
-            idx = counter["done"]
-
-            # Extract filename and extension
-            path = urlparse(url).path
-            filename = path.split("/")[-1] or "document"
-            _, ext = splitext(path)
-            ext = ext.lower() or ".pdf"
-
-            # Live check: skip if another instance already stored this URL
-            if not force and url_exists_in_qdrant(
-                app_config.qdrant_url, app_config.qdrant_api_key, config_name, url
-            ):
-                counter["skipped"] += 1
-                processed_urls.add(url)
-                _echo(f"  [doc {idx}/{total}] Already in Qdrant: {filename}")
-                return
-
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-            except Exception as e:
-                counter["failed"] += 1
-                if counter["failed"] <= 10:
-                    _echo(f"  [doc {idx}/{total}] Download failed: {filename} — {e}")
-                return
-            finally:
-                await asyncio.sleep(config.delay_between_requests)
-
-            data = resp.content
-            size_mb = len(data) / (1024 * 1024)
-
-            if len(data) > max_size:
-                _echo(f"  [doc {idx}/{total}] Skipping {filename} ({size_mb:.1f} MB > 50 MB)")
-                return
-
-            _echo(f"  [doc {idx}/{total}] Converting: {filename} ({size_mb:.1f} MB)")
-
-            # Write to temp file and convert with Docling
-            t0 = time.monotonic()
-            try:
-                text = await asyncio.to_thread(_convert_document, converter, data, ext)
-            except Exception as e:
-                counter["failed"] += 1
-                if counter["failed"] <= 10:
-                    _echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {e}")
-                return
-
-            elapsed = time.monotonic() - t0
-
-            if not text or not text.strip():
-                _echo(f"  [doc {idx}/{total}] Empty: {filename} — no text extracted, {elapsed:.1f}s")
-                return
-
-            text = text.strip()
-            processed_urls.add(url)
-
-            # Hash check
-            h = content_hash(text)
-            if not force and url in existing_hashes and existing_hashes[url] == h:
-                counter["skipped"] += 1
-                _echo(f"  [doc {idx}/{total}] Unchanged: {filename}, {elapsed:.1f}s")
-                return
-
-            # Title from first line
-            lines = [l.strip().lstrip("#").strip() for l in text.split("\n") if l.strip()]
-            title = lines[0][:150] if lines else filename
-            doc_format = ext.lstrip(".")
-
-            # Delete old vectors if this URL changed
-            if url in existing_hashes:
-                delete_by_source_urls(
-                    app_config.qdrant_url, app_config.qdrant_api_key, config_name, {url}
-                )
-
-            # Chunk, embed, store
-            chunks = chunk_page(
-                markdown=text,
-                source_url=url,
-                page_title=title,
-                site_name=config_name,
-            )
-            for c in chunks:
-                c.metadata.update({
-                    "content_type": "document",
-                    "document_format": doc_format,
-                    "sitemap_lastmod": urls.get(url),
-                })
-
-            texts = [c.text for c in chunks]
-            embeddings = await asyncio.to_thread(embed_texts, texts, app_config.openai_api_key)
-
-            count = upsert_chunks(
-                app_config.qdrant_url, app_config.qdrant_api_key, config_name, chunks, embeddings
-            )
-            counter["stored"] += count
-            existing_hashes[url] = h
-
-            _echo(
-                f"  [doc {idx}/{total}] Stored: {filename} — "
-                f"{len(chunks)} chunks, {len(text)} chars, {elapsed:.1f}s"
-            )
 
     async with httpx.AsyncClient(
         headers={"User-Agent": config.user_agent},
         follow_redirects=True,
         timeout=120,
     ) as client:
-        tasks = [_process_one(client, url) for url in urls]
-        await asyncio.gather(*tasks)
+        for idx, (url, lastmod) in enumerate(urls.items(), 1):
+            # --- Extract filename ---
+            path = urlparse(url).path
+            filename = path.split("/")[-1] or "document"
+            _, ext = splitext(path)
+            ext = ext.lower() or ".pdf"
+
+            # --- Live Qdrant check ---
+            if not force and url_exists_in_qdrant(
+                app_config.qdrant_url, app_config.qdrant_api_key, config_name, url
+            ):
+                skipped += 1
+                processed_urls.add(url)
+                _echo(f"  [doc {idx}/{total}] Already in Qdrant: {filename}")
+                continue
+
+            # --- Download ---
+            resp = None
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.content
+            except Exception as e:
+                failed += 1
+                if failed <= 10:
+                    _echo(f"  [doc {idx}/{total}] Download failed: {filename} — {e}")
+                await asyncio.sleep(config.delay_between_requests)
+                continue
+            finally:
+                del resp  # release response
+
+            await asyncio.sleep(config.delay_between_requests)
+
+            size_mb = len(data) / (1024 * 1024)
+            if len(data) > MAX_SIZE:
+                _echo(f"  [doc {idx}/{total}] Skipping {filename} ({size_mb:.1f} MB > 50 MB)")
+                data = None
+                continue
+
+            _echo(f"  [doc {idx}/{total}] Converting: {filename} ({size_mb:.1f} MB)")
+
+            # --- Convert with Docling (with timeout) ---
+            t0 = time.monotonic()
+            try:
+                text = await asyncio.wait_for(
+                    asyncio.to_thread(_convert_document, converter, data, ext),
+                    timeout=CONVERT_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                failed += 1
+                _echo(
+                    f"  [doc {idx}/{total}] Timeout after {CONVERT_TIMEOUT}s: {filename}"
+                )
+                data = None
+                continue
+            except Exception as e:
+                failed += 1
+                if failed <= 10:
+                    _echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {e}")
+                data = None
+                continue
+            finally:
+                data = None  # release PDF bytes
+
+            elapsed = time.monotonic() - t0
+            converted_since_reset += 1
+
+            if not text or not text.strip():
+                _echo(f"  [doc {idx}/{total}] Empty: {filename} — {elapsed:.1f}s")
+                text = None
+                continue
+
+            text = text.strip()
+            processed_urls.add(url)
+
+            # --- Hash check ---
+            h = content_hash(text)
+            if not force and url in existing_hashes and existing_hashes[url] == h:
+                skipped += 1
+                _echo(f"  [doc {idx}/{total}] Unchanged: {filename}, {elapsed:.1f}s")
+                text = None
+                continue
+
+            # --- Chunk, embed, store ---
+            lines = [l.strip().lstrip("#").strip() for l in text.split("\n") if l.strip()]
+            title = lines[0][:150] if lines else filename
+            doc_format = ext.lstrip(".")
+
+            if url in existing_hashes:
+                delete_by_source_urls(
+                    app_config.qdrant_url, app_config.qdrant_api_key, config_name, {url}
+                )
+
+            chunks = chunk_page(
+                markdown=text,
+                source_url=url,
+                page_title=title,
+                site_name=config_name,
+            )
+            text = None  # release extracted text
+
+            for c in chunks:
+                c.metadata.update({
+                    "content_type": "document",
+                    "document_format": doc_format,
+                    "sitemap_lastmod": lastmod,
+                })
+
+            chunk_texts = [c.text for c in chunks]
+            embeddings = await asyncio.to_thread(
+                embed_texts, chunk_texts, app_config.openai_api_key
+            )
+            chunk_texts = None  # release text list
+
+            count = upsert_chunks(
+                app_config.qdrant_url, app_config.qdrant_api_key,
+                config_name, chunks, embeddings,
+            )
+            stored_total += count
+            existing_hashes[url] = h
+
+            _echo(
+                f"  [doc {idx}/{total}] Stored: {filename} — "
+                f"{len(chunks)} chunks, {elapsed:.1f}s"
+            )
+            chunks = None
+            embeddings = None
+
+            # --- Periodic converter reset to free Docling memory ---
+            if converted_since_reset >= CONVERTER_RESET_INTERVAL:
+                _echo(f"  Resetting Docling converter (every {CONVERTER_RESET_INTERVAL} docs)...")
+                converter = reset_converter(ocr=config.ocr)
+                converted_since_reset = 0
 
     _echo(
-        f"  Documents done: {counter['stored']} vectors stored, "
-        f"{counter['skipped']} unchanged, {counter['failed']} failed"
+        f"  Documents done: {stored_total} vectors stored, "
+        f"{skipped} unchanged, {failed} failed"
     )
-    return counter["stored"], counter["skipped"], processed_urls
+    return stored_total, skipped, processed_urls
 
 
 def _convert_document(converter, data: bytes, ext: str) -> str:
