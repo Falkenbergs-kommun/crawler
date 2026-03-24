@@ -6,12 +6,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Web crawler that indexes Swedish municipality Google Sites into Qdrant vector collections for RAG. It crawls JS-rendered pages, extracts linked Google Docs/Sheets/Slides/Drive PDFs and YouTube metadata, chunks the content, generates OpenAI embeddings, and upserts to Qdrant.
 
+## Setup
+
+```bash
+# Install Python dependencies (uses uv, not pip)
+uv sync
+
+# Install Playwright's Chromium browser
+uv run playwright install chromium
+```
+
+### System libraries (no sudo required)
+
+Playwright's Chromium needs system libraries (libnspr4, libnss3, etc.) that may not be
+installed on the server. Since we don't have sudo, we download the .deb packages and
+extract the .so files into a local directory:
+
+```bash
+mkdir -p .local-libs /tmp/deb-extract
+cd /tmp/deb-extract
+apt-get download libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libxcomposite1 libxdamage1
+for deb in *.deb; do dpkg-deb -x "$deb" extracted/; done
+cp extracted/usr/lib/x86_64-linux-gnu/*.so* /path/to/crawler/.local-libs/
+rm -rf /tmp/deb-extract
+```
+
+Then add this line to `.env` so the crawler finds them automatically:
+
+```
+LD_LIBRARY_PATH=/absolute/path/to/.local-libs
+```
+
+Verify with: `ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome 2>&1 | grep "not found"`
+— should return nothing.
+
+**Updating these libraries:** These are stable C libraries (NSS, NSPR, ATK, X11) that
+rarely need patching. They should be updated if Playwright upgrades its bundled Chromium
+to a version that requires newer .so versions — this would show up as a missing symbol
+error or version mismatch when launching the crawler. To update, re-run the `apt-get
+download` commands above to get the latest versions from the Debian repos.
+
 ## Commands
 
 ```bash
-# Install dependencies (uses uv, not pip)
-uv sync
-
 # Run the crawler (incremental — only embeds new/changed pages)
 uv run crawler crawl
 
