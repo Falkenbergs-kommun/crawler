@@ -33,6 +33,35 @@ uv sync
 uv run playwright install chromium
 ```
 
+### Systembibliotek för Chromium (utan sudo)
+
+Playwright's Chromium kräver ett antal systembibliotek (libnspr4, libnss3, m.fl.) som kanske inte finns installerade på servern. Utan sudo-åtkomst kan du ladda ner `.deb`-paketen och extrahera `.so`-filerna lokalt:
+
+```bash
+mkdir -p .local-libs /tmp/deb-extract
+cd /tmp/deb-extract
+apt-get download libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libatspi2.0-0 libxcomposite1 libxdamage1
+for deb in *.deb; do dpkg-deb -x "$deb" extracted/; done
+cp extracted/usr/lib/x86_64-linux-gnu/*.so* /sökväg/till/crawler/.local-libs/
+rm -rf /tmp/deb-extract
+```
+
+Lägg sedan till denna rad i `.env` så att crawlern hittar biblioteken automatiskt:
+
+```env
+LD_LIBRARY_PATH=/absolut/sökväg/till/.local-libs
+```
+
+Verifiera med:
+
+```bash
+ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome 2>&1 | grep "not found"
+```
+
+Om kommandot inte ger någon output är allt korrekt.
+
+> **Behöver biblioteken uppdateras?** Dessa är stabila C-bibliotek (NSS, NSPR, ATK, X11) som sällan ändras. De behöver bara uppdateras om Playwright uppgraderar sin bundlade Chromium till en version som kräver nyare `.so`-versioner — det visar sig som ett symbolfel eller versionsmismatch vid start. Kör i så fall om `apt-get download`-kommandona ovan för att hämta senaste versionerna.
+
 ## Konfiguration
 
 ### Miljövariabler (`.env`)
