@@ -364,6 +364,15 @@ async def process_documents(
                     pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
                     data = None
                     continue
+                except concurrent.futures.process.BrokenProcessPool as e:
+                    failed += 1
+                    _echo(
+                        f"  [doc {idx}/{total}] Worker crashed: {filename} — recreating pool"
+                    )
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+                    data = None
+                    continue
                 except Exception as e:
                     failed += 1
                     if failed <= 10:
