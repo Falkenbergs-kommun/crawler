@@ -208,12 +208,14 @@ def _extract_document_links(
         if not href or href.startswith(("#", "javascript:", "mailto:")):
             continue
         abs_url = urljoin(page_url, href)
+        parsed = urlparse(abs_url)
+        # Skip non-HTTP URLs (e.g. local file paths like C:/Users/...)
+        if parsed.scheme not in ("http", "https"):
+            continue
         # Strip query/fragment before checking extension
-        path = urlparse(abs_url).path
-        _, ext = splitext(path)
+        _, ext = splitext(parsed.path)
         if ext.lower() in doc_extensions:
             # Normalise: drop fragment, keep query (some CDNs use it)
-            parsed = urlparse(abs_url)
             clean = urlunparse((
                 parsed.scheme, parsed.netloc, parsed.path,
                 parsed.params, parsed.query, "",
