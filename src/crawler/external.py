@@ -11,7 +11,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from posixpath import splitext
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import click
 import httpx
@@ -188,6 +188,41 @@ def _normalize_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 2c-pre. Linked document discovery
+# ---------------------------------------------------------------------------
+
+_HREF_RE = re.compile(r'<a\s[^>]*href=["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+def _extract_document_links(
+    html: str, page_url: str, doc_extensions: set[str]
+) -> set[str]:
+    """Extract absolute URLs to documents from HTML <a> tags.
+
+    Resolves relative URLs against *page_url* and keeps only those whose
+    path ends with one of the *doc_extensions* (e.g. {".pdf", ".docx"}).
+    """
+    found: set[str] = set()
+    for match in _HREF_RE.finditer(html):
+        href = match.group(1).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        abs_url = urljoin(page_url, href)
+        # Strip query/fragment before checking extension
+        path = urlparse(abs_url).path
+        _, ext = splitext(path)
+        if ext.lower() in doc_extensions:
+            # Normalise: drop fragment, keep query (some CDNs use it)
+            parsed = urlparse(abs_url)
+            clean = urlunparse((
+                parsed.scheme, parsed.netloc, parsed.path,
+                parsed.params, parsed.query, "",
+            ))
+            found.add(clean)
+    return found
+
+
+# ---------------------------------------------------------------------------
 # 2c. Page fetcher (web pages via httpx + trafilatura)
 # ---------------------------------------------------------------------------
 
@@ -197,11 +232,19 @@ async def fetch_pages(
     config: ExternalSiteConfig,
     counter_offset: int = 0,
     total_override: int | None = None,
-) -> list[PageResult]:
-    """Fetch web pages with httpx and extract text with trafilatura."""
+) -> tuple[list[PageResult], set[str]]:
+    """Fetch web pages with httpx and extract text with trafilatura.
+
+    Returns (page_results, discovered_document_urls).  When
+    ``config.discover_linked_documents`` is True, every fetched page is
+    scanned for ``<a href>`` links whose path ends with a document
+    extension.  The discovered URLs are returned as the second element.
+    """
     import trafilatura
 
     results: list[PageResult] = []
+    discovered_docs: set[str] = set()
+    doc_exts = set(config.document_extensions) if config.discover_linked_documents else set()
     sem = asyncio.Semaphore(config.max_concurrent)
     total = total_override or len(urls)
     counter = {"done": 0, "failed": 0}
@@ -214,6 +257,12 @@ async def fetch_pages(
                 resp = await client.get(url)
                 resp.raise_for_status()
                 html = resp.text
+
+                # Discover linked documents before stripping HTML
+                if doc_exts:
+                    discovered_docs.update(
+                        _extract_document_links(html, url, doc_exts)
+                    )
 
                 text = trafilatura.extract(
                     html,
@@ -256,7 +305,9 @@ async def fetch_pages(
         await asyncio.gather(*tasks)
 
     _echo(f"  Pages: {len(results)} OK, {counter['failed']} failed")
-    return results
+    if discovered_docs:
+        _echo(f"  Discovered {len(discovered_docs)} linked documents from page content")
+    return results, discovered_docs
 
 
 # ---------------------------------------------------------------------------
@@ -611,6 +662,7 @@ async def crawl_external_site(
     all_processed_urls: set[str] = set()
 
     # 5. Process pages in batches
+    discovered_doc_urls: set[str] = set()
     if pages:
         page_url_list = list(pages.keys())
         total_pages = len(page_url_list)
@@ -624,12 +676,13 @@ async def crawl_external_site(
             }
             batch_num = batch_start // PAGE_BATCH_SIZE + 1
 
-            page_results = await fetch_pages(
+            page_results, batch_discovered = await fetch_pages(
                 batch_urls,
                 config,
                 counter_offset=batch_start,
                 total_override=total_pages,
             )
+            discovered_doc_urls.update(batch_discovered)
 
             items = [
                 {
@@ -656,6 +709,16 @@ async def crawl_external_site(
                 f"  Page batch {batch_num}/{num_batches}: "
                 f"{stored} vectors stored, {skipped_batch} unchanged"
             )
+
+    # 5b. Merge linked documents discovered from page content
+    if discovered_doc_urls and not pages_only:
+        new_docs = {u: None for u in discovered_doc_urls if u not in documents}
+        if new_docs:
+            _echo(
+                f"\n  Discovered {len(new_docs)} additional documents "
+                f"linked from page content"
+            )
+            documents.update(new_docs)
 
     # 6. Process documents (each doc is embedded+stored immediately after conversion)
     if documents:

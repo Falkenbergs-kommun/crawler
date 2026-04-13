@@ -53,3 +53,28 @@ external_sites:
     js_rendering: false
     user_agent: "FalkenbergKommun-RAG-Bot/1.0"
     ocr: false
+
+  - name: "vardhandboken"
+    base_url: "https://www.vardhandboken.se"
+    discovery: "sitemap"
+    sitemaps:
+      - "https://www.vardhandboken.se/sitemap.xml"
+    document_extensions:
+      - ".pdf"
+      - ".docx"
+      - ".pptx"
+    skip_extensions:
+      - ".png"
+      - ".jpg"
+      - ".jpeg"
+      - ".gif"
+      - ".webp"
+      - ".svg"
+    exclude_patterns:
+      - "^https://www\\.vardhandboken\\.se/episerver/"
+    max_concurrent: 5
+    delay_between_requests: 0.5
+    js_rendering: false
+    user_agent: "FalkenbergKommun-RAG-Bot/1.0"
+    ocr: false
+    discover_linked_documents: true

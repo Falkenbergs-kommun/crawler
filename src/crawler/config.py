@@ -40,6 +40,7 @@ class ExternalSiteConfig:
     js_rendering: bool = False
     user_agent: str = "FalkenbergKommun-RAG-Bot/1.0"
     ocr: bool = True
+    discover_linked_documents: bool = False
 
 
 @dataclass
@@ -88,6 +89,7 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
             js_rendering=ext.get("js_rendering", False),
             user_agent=ext.get("user_agent", "FalkenbergKommun-RAG-Bot/1.0"),
             ocr=ext.get("ocr", True),
+            discover_linked_documents=ext.get("discover_linked_documents", False),
         ))
 
     return AppConfig(
