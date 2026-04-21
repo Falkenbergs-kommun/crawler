@@ -83,6 +83,33 @@ nohup uv run crawler crawl-external --site skolverket --docs-only > crawl-docs.l
 
 # Force re-embedding of all content
 uv run crawler crawl-external --site skolverket --force
+
+# Cap new-doc processing (nightly-friendly, stops after N Docling attempts)
+uv run crawler crawl-external --docs-only --max-new-docs 50
+
+# --- Intranet articles (Joomla, DB-backed) ---
+
+# Fetch all configured intranet articles (reads ez3pg_content directly)
+uv run crawler crawl-intranet
+
+# Test a single article
+uv run crawler crawl-intranet --article-id 3419
+
+# --- Single pages (one URL, no crawling) ---
+uv run crawler crawl-single-pages
+
+# --- Sync source list from editorial Google Sheet ---
+
+# Dry-run (shows diff, does NOT modify config.yaml)
+uv run crawler sync-config
+
+# Apply changes
+uv run crawler sync-config --apply
+
+# --- Nightly automation ---
+
+# Wrapper script used by cron — runs sync-config + all fast pipelines + capped docs
+bin/nightly-sync.sh
 ```
 
 No test suite exists yet.
@@ -97,7 +124,10 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 - **chunker.py** — Token-aware splitting with `langchain-text-splitters` using `cl100k_base` tokenizer (512 tokens, 100 overlap). Each chunk carries metadata: source_url, page_title, site_name, chunk_index, crawl_date, content_hash.
 - **embedder.py** — OpenAI `text-embedding-3-large` (3072 dimensions), batched in 100s with exponential backoff retry.
 - **store.py** — Qdrant client wrapper. Uses deterministic UUIDs (`uuid5` from url+chunk_index) for idempotent upserts. Creates payload indexes on `source_url` and `site_name` for filtered queries and site-level deletion. `get_existing_hashes()` scrolls Qdrant to retrieve stored content hashes for diff comparison. `url_exists_in_qdrant()` does a lightweight single-URL existence check for live deduplication during parallel runs.
-- **config.py** — Loads `config.yaml` (collections, sites, external_sites) + `.env` (API keys). Config is relative to the YAML file location. Includes `ExternalSiteConfig` for sitemap-based external websites.
+- **config.py** — Loads `config.yaml` (collections, sites, external_sites, intranet_articles, single_pages) + `.env` (API keys, intranet DB creds). Config is relative to the YAML file location. Dataclasses: `SiteConfig`, `CollectionConfig`, `ExternalSiteConfig`, `IntranetArticleConfig`, `SinglePageConfig`, `IntranetDBConfig`.
+- **sheet_sync.py** — Syncs source definitions from a Google Sheet into `config.yaml`. `fetch_sheet_rows()` auto-detects the header row (sheet may have title/empty rows first). `classify_row()` maps each row to one of: `intranet` (Kommentarer=Intranätsida + Artikel-ID), `google_sites` (URL under sites.google.com), `single_page` (URL, Följ länkar≠JA), `external_site` (URL, Följ länkar=JA — flagged as needing manual sitemap config), or `skip`. `compute_diff()` matches existing config entries by URL-path-prefix for Google Sites, article_id for intranet, exact URL for single pages — preserves technical fields (max_depth, sitemap, ocr, etc.) untouched. `apply_diff()` uses `ruamel.yaml` round-trip to preserve comments, quotes, and ordering. Additive-only: orphans (in config, not in sheet) are flagged but not removed.
+- **intranet.py** — Crawl Joomla intranet articles by ID via direct DB read (`<prefix>content.introtext` + `fulltext`). Bypasses SSO/login. HTML cleaned with trafilatura, then handed to the shared `_embed_and_store_batch`. `source_url` deterministic: `<base>/index.php?option=com_content&view=article&id=<id>`. Articles grouped by `collection` field; each collection becomes its own Qdrant collection.
+- **single_pages.py** — Fetch standalone URLs (no crawling) via httpx + trafilatura. One `SinglePageConfig` entry per URL. Reuses `_embed_and_store_batch` so hash-diff and stale-detection behave identically to external pages.
 - **external.py** — Pipeline for external websites: sitemap parsing (with gzip/sitemap-index support), URL classification, page fetching (httpx + trafilatura), document processing (httpx + Docling), and orchestration with incremental sync. Documents are processed strictly one at a time in a sequential loop to keep memory bounded — all intermediate data (PDF bytes, text, chunks, embeddings) is released between documents. Docling conversion runs in a subprocess (`ProcessPoolExecutor`) so that timeouts actually kill the worker — thread-based timeouts left zombie threads that caused OOM kills. Pages are still processed in parallel batches (200) since they are lightweight. All output uses `_echo()` which flushes stdout for nohup compatibility. When `discover_linked_documents` is enabled, `fetch_pages` also scans page HTML for `<a href>` links to documents (matching `document_extensions`) and feeds discovered URLs into the document processing stage — this catches documents linked from page content but not listed in the sitemap (e.g. external PDFs on other domains).
 - **docling_utils.py** — Shared lazy-loaded Docling `DocumentConverter` instances, cached per OCR setting. When `ocr=False`, Docling skips bitmap/OCR processing and only extracts programmatically embedded text — much faster for born-digital PDFs. Used by `gdrive.py` (in-process) and `external.py` (in subprocess workers).
 
@@ -121,8 +151,23 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 - **Per-document live Qdrant check** — During document processing, each document is checked against Qdrant before download (`url_exists_in_qdrant`). This enables safe parallel `--docs-only` runs on multiple servers — the second instance skips documents already stored by the first, avoiding redundant Docling conversion and embedding costs.
 - **Sitemap gzip detection** — Uses URL suffix `.gz`, `Content-Type`, or `Content-Encoding` headers. `httpx` auto-decompresses `Content-Encoding: gzip`, but sitemap files served as `application/gzip` need manual `gzip.decompress()`.
 - **Linked document discovery** — When `discover_linked_documents: true` in config, `fetch_pages` scans every fetched HTML page for `<a href>` links matching `document_extensions`. Discovered URLs (including cross-domain) are merged into the document processing queue. This is opt-in per site to avoid unexpected Docling load on sites where the sitemap already covers all documents. Discovered docs get `lastmod: None` but incremental sync still works via content hashing.
+- **Skip list for failing documents** — Timeouts and convert errors append the URL to `skip/<site>.tsv`. Future runs check the skip list before download and skip known failures. This matters because Docling timeouts are usually stable per document (corrupt or unusually complex PDF) — retrying costs another 600s per doc without fixing anything. To retry a specific document, delete its line from the TSV.
+- **Per-night document budget** — `--max-new-docs N` caps how many documents reach Docling conversion (successes + timeouts + convert failures; download errors and Qdrant hits don't count). Budget is global across all external sites in one invocation. When a budget is set, stale-detection is skipped — an intentionally truncated run cannot reliably distinguish "processed" from "not yet reached" and could otherwise delete untouched vectors.
+
+## Nightly automation
+
+`bin/nightly-sync.sh` is a bash wrapper that runs in cron (02:15 daily):
+
+1. Pings Healthchecks `/start`
+2. Runs in sequence: `sync-config --apply` → `crawl` (Google Sites) → `crawl-intranet` → `crawl-single-pages` → `crawl-external --docs-only --max-new-docs 50`
+3. Captures stdout+stderr per step, extracts per-step summary (stored/unchanged counts)
+4. Builds a top-of-body summary with stage status + key metrics
+5. POSTs full log as body to `/ping/<UUID>` (success) or `/ping/<UUID>/fail` (any step failed)
+
+`crawl-external-docs` in the nightly uses `--docs-only` to skip the pages phase (3979+ URLs for Skolverket re-fetched every night would be too heavy). Pages can be scheduled separately (weekly recommended).
 
 ## Configuration
 
-- `config.yaml` — Defines `collections` (Google Sites) and `external_sites` (sitemap-based websites). Each external site has discovery mode, document/skip extensions, exclude patterns, rate limiting, `ocr` (bool, default true) to control Docling OCR for document extraction, and `discover_linked_documents` (bool, default false) to extract document links from page content.
-- `.env` — Must contain `OPENAI_API_KEY`. Optionally `QDRANT_URL` (defaults to localhost:6333) and `QDRANT_API_KEY`.
+- `config.yaml` — Defines four source types. `collections` (Google Sites crawled with Playwright). `external_sites` (sitemap-based, httpx + Docling). `intranet_articles` (Joomla articles by ID, direct DB read; `collection` field groups related articles). `single_pages` (one URL per entry, httpx + trafilatura).
+- `.env` — `OPENAI_API_KEY` (required). `QDRANT_URL`, `QDRANT_API_KEY` (Qdrant). `INTRANET_DB_HOST/NAME/USER/PASS/PREFIX`, `INTRANET_BASE_URL` (for `crawl-intranet`, reused from mail-reminders/.env pattern). `HEALTHCHECKS_BASE_URL`, `HEALTHCHECKS_CRAWLER_NIGHTLY_ID` (ping endpoint for nightly wrapper).
+- `skip/<site>.tsv` — Persistent skip list per external site. Format: `url<TAB>filename<TAB>error<TAB>date`. Managed automatically by `external.py`; manual edits are respected (delete a row to retry that doc).

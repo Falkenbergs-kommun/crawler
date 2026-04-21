@@ -16,6 +16,8 @@ dependencies = [
     "httpx",
     "docling>=2.81.0",
     "trafilatura>=2.0",
+    "ruamel.yaml>=0.18",
+    "pymysql>=1.1",
 ]
 
 [project.scripts]

@@ -1,0 +1,5 @@
+# Documents that failed conversion — skipped on future runs
+# Remove a line to retry that document on the next crawl
+# url	filename	error	date
+https://www.skolverket.se/download/18.6bfaca41169863e6a658a36/1553962158332/pdf2329.pdf	pdf2329.pdf	Timeout after 600s	2026-04-21
+https://www.skolverket.se/download/18.6bfaca41169863e6a65865e/1553961899559/pdf2217.pdf	pdf2217.pdf	Timeout after 600s	2026-04-21

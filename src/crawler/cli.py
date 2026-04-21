@@ -216,8 +216,21 @@ def crawl(ctx: click.Context, collection: str | None, force: bool) -> None:
 @click.option("--force", is_flag=True, help="Force re-embedding, ignore hashes and lastmod")
 @click.option("--pages-only", is_flag=True, help="Only crawl web pages, skip documents")
 @click.option("--docs-only", is_flag=True, help="Only crawl documents, skip web pages")
+@click.option(
+    "--max-new-docs",
+    type=int,
+    default=None,
+    help="Max antal NYA dokument att Docling-konvertera totalt över alla sites (successer + timeouts + fel). Ingen begränsning om utelämnad.",
+)
 @click.pass_context
-def crawl_external(ctx: click.Context, site: str | None, force: bool, pages_only: bool, docs_only: bool) -> None:
+def crawl_external(
+    ctx: click.Context,
+    site: str | None,
+    force: bool,
+    pages_only: bool,
+    docs_only: bool,
+    max_new_docs: int | None,
+) -> None:
     """Crawl external websites defined in config and index to Qdrant."""
     from .external import crawl_external_site
 
@@ -238,18 +251,30 @@ def crawl_external(ctx: click.Context, site: str | None, force: bool, pages_only
         click.echo("Cannot use --pages-only and --docs-only together.")
         raise SystemExit(1)
 
+    remaining_budget = max_new_docs  # global budget across sites; None = unlimited
+
     for ext_site in sites:
         click.echo(f"\n{'='*60}")
         click.echo(f"External site: {ext_site.name}")
+        if remaining_budget is not None:
+            click.echo(f"Kvarvarande doc-budget: {remaining_budget}")
         click.echo(f"{'='*60}")
 
-        asyncio.run(crawl_external_site(
+        if remaining_budget is not None and remaining_budget <= 0:
+            click.echo("Budget slut — hoppar över resterande sites.")
+            break
+
+        consumed = asyncio.run(crawl_external_site(
             config=ext_site,
             app_config=cfg,
             force=force,
             pages_only=pages_only,
             docs_only=docs_only,
+            max_new_docs=remaining_budget,
         ))
+
+        if remaining_budget is not None:
+            remaining_budget = max(0, remaining_budget - (consumed or 0))
 
     click.echo("\nDone.")
 
@@ -282,6 +307,128 @@ def delete(ctx: click.Context, collection: str) -> None:
         click.echo(f"Deleted collection '{collection}'.")
     else:
         click.echo(f"Collection '{collection}' not found.")
+
+
+@cli.command("crawl-intranet")
+@click.option("--collection", default=None, help="Kör bara denna intranet-collection")
+@click.option("--article-id", type=int, default=None, help="Kör bara en specifik artikel (test)")
+@click.option("--force", is_flag=True, help="Tvinga om-embedding, ignorera hash")
+@click.pass_context
+def crawl_intranet(
+    ctx: click.Context,
+    collection: str | None,
+    article_id: int | None,
+    force: bool,
+) -> None:
+    """Hämta intranet-artiklar (Joomla) via DB och indexera till Qdrant."""
+    from .intranet import crawl_intranet_articles
+
+    cfg = load_config(ctx.obj["config_path"])
+
+    if not cfg.intranet_articles:
+        click.echo("Inga intranet_articles definierade i config.")
+        raise SystemExit(1)
+
+    if cfg.intranet_db is None:
+        click.echo("INTRANET_DB_HOST saknas i .env — kan inte ansluta till intranätets DB.")
+        raise SystemExit(1)
+
+    asyncio.run(crawl_intranet_articles(
+        articles_config=cfg.intranet_articles,
+        app_config=cfg,
+        only_collection=collection,
+        only_article_id=article_id,
+        force=force,
+    ))
+
+    click.echo("\nKlart.")
+
+
+@cli.command("crawl-single-pages")
+@click.option("--collection", default=None, help="Kör bara denna single-pages-collection")
+@click.option("--url", "url_filter", default=None, help="Kör bara denna specifika URL (test)")
+@click.option("--force", is_flag=True, help="Tvinga om-embedding, ignorera hash")
+@click.pass_context
+def crawl_single_pages_cmd(
+    ctx: click.Context,
+    collection: str | None,
+    url_filter: str | None,
+    force: bool,
+) -> None:
+    """Hämta enstaka webbsidor (utan crawling) och indexera till Qdrant."""
+    from .single_pages import crawl_single_pages
+
+    cfg = load_config(ctx.obj["config_path"])
+
+    if not cfg.single_pages:
+        click.echo("Inga single_pages definierade i config.")
+        raise SystemExit(1)
+
+    asyncio.run(crawl_single_pages(
+        pages_config=cfg.single_pages,
+        app_config=cfg,
+        only_collection=collection,
+        only_url=url_filter,
+        force=force,
+    ))
+
+    click.echo("\nKlart.")
+
+
+@cli.command("sync-config")
+@click.option(
+    "--sheet-id",
+    default="1D_i7tHPdEPQ1giXCZIQormZNK_hAX3vkQBuIFRvxubw",
+    help="Google Sheet ID (defaultar till sources-arket)",
+)
+@click.option("--gid", default=0, type=int, help="Sheet tab gid (default: 0)")
+@click.option(
+    "--apply",
+    "do_apply",
+    is_flag=True,
+    help="Skriv till config.yaml. Utan denna flagga körs endast dry-run med diff.",
+)
+@click.pass_context
+def sync_config(ctx: click.Context, sheet_id: str, gid: int, do_apply: bool) -> None:
+    """Synka källor från Google-ark till config.yaml.
+
+    Dry-run är default. Använd --apply för att faktiskt skriva ändringar.
+    Tekniska fält (max_depth, sitemap, ocr, etc.) lämnas orörda på befintliga
+    entries; endast nya källor läggs till. Orphans (i config men inte i ark)
+    flaggas men raderas aldrig automatiskt.
+    """
+    from .sheet_sync import apply_diff, compute_diff, fetch_sheet_rows, render_diff
+
+    cfg = load_config(ctx.obj["config_path"])
+    config_path = Path(ctx.obj["config_path"])
+
+    click.echo(f"Läser sheet {sheet_id[:16]}… (gid={gid})...")
+    try:
+        rows = fetch_sheet_rows(sheet_id, gid)
+    except Exception as e:
+        click.echo(f"  FEL: Kunde inte läsa ark — {e}")
+        raise SystemExit(1)
+
+    click.echo(f"  {len(rows)} rader lästa.")
+    if not rows:
+        click.echo("  ERROR: Arket är tomt — aborterar (skyddar befintlig config).")
+        raise SystemExit(1)
+    click.echo("")
+
+    diff = compute_diff(rows, cfg)
+    click.echo(render_diff(diff))
+    click.echo("")
+
+    if not diff.has_changes():
+        click.echo("Inga ändringar att skriva.")
+        return
+
+    if not do_apply:
+        click.echo("Kör med --apply för att skriva ändringar till config.yaml.")
+        return
+
+    apply_diff(diff, config_path)
+    click.echo(f"Skrev ändringar till {config_path}.")
 
 
 @cli.command("remove-site")

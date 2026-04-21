@@ -1,0 +1,45 @@
+# Documents that failed conversion — skipped on future runs
+# Remove a line to retry that document on the next crawl
+# url	filename	error	date
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2016-4-44.pdf	2016-4-44.pdf	Input document /tmp/tmpjbxen7ty.pdf is not valid.	2026-04-13
+http://muep.mau.se/bitstream/handle/2043/5589/Eiman Johansson 2007_kappa licavh_ssk klin beslusfatt PVK.pdf?sequence=1&isAllowed=y	Eiman Johansson 2007_kappa licavh_ssk klin beslusfatt PVK.pdf	Input document /tmp/tmpdqnvrk37.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/kunskapsstod/2016-10-31.pdf	2016-10-31.pdf	Input document /tmp/tmplr74glfg.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/handbocker/2019-6-5360.pdf	2019-6-5360.pdf	Input document /tmp/tmpcicirpiy.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/vagledning/2012-3-3.pdf	2012-3-3.pdf	Input document /tmp/tmpj4cmoj5x.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/meddelandeblad/2022-12-8294.pdf	2022-12-8294.pdf	Input document /tmp/tmp53h5h2fc.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2019-9-6291.pdf	2019-9-6291.pdf	Input document /tmp/tmpm_skors1.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/ovrigt/2015-1-5.pdf	2015-1-5.pdf	Input document /tmp/tmptu1x7jbu.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/nationella-riktlinjer/2016-12-12-indikatorbilaga.pdf	2016-12-12-indikatorbilaga.pdf	Input document /tmp/tmprptxi923.pdf is not valid.	2026-04-13
+https://www.lakartidningen.se/wp-content/uploads/OldWebArticlePdf/1/10445/LKT0841s2844_2849.pdf	LKT0841s2844_2849.pdf	Input document /tmp/tmp7l4m77za.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2020-11-6986.pdf	2020-11-6986.pdf	Input document /tmp/tmpyzk5fw5x.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/kunskapsstod/2013-6-4.pdf	2013-6-4.pdf	Input document /tmp/tmp4rmu19re.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/ovrigt/2021-3-7291.pdf	2021-3-7291.pdf	Input document /tmp/tmpcu3o03n0.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2012-2-20.pdf	2012-2-20.pdf	Input document /tmp/tmps6s4hg12.pdf is not valid.	2026-04-13
+http://www.lakartidningen.se/OldPdfFiles/2004/28712.pdf	28712.pdf	Input document /tmp/tmphr6bwi_8.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/ovrigt/2017-2-19.pdf	2017-2-19.pdf	Input document /tmp/tmpepk9oen4.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/handbocker/2014-1-24.pdf	2014-1-24.pdf	Input document /tmp/tmpbt0hnp_n.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/1996-10-28.pdf	1996-10-28.pdf	Input document /tmp/tmpfispgh16.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/kunskapsstod/2023-3-8440.pdf	2023-3-8440.pdf	Input document /tmp/tmpc82pe9m9.pdf is not valid.	2026-04-13
+https://www.ecdc.europa.eu/sites/default/files/documents/healthcare-associated-point-prevalence-survey-acute-care-hospitals-2022-2023.pdf	healthcare-associated-point-prevalence-survey-acute-care-hospitals-2022-2023.pdf	Timeout after 600s	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/klassifikationer-och-koder/2022-1-7716.pdf	2022-1-7716.pdf	Input document /tmp/tmpe6ab6ub_.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2022-8-8078.pdf	2022-8-8078.pdf	Input document /tmp/tmpi_oacqyh.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/meddelandeblad/2020-1-6546.pdf	2020-1-6546.pdf	Input document /tmp/tmp2t21lv7o.pdf is not valid.	2026-04-13
+https://sahlgrenska-klinkem-analyser.vgregion.se/KMIKAD107859.pdf	KMIKAD107859.pdf	Input document /tmp/tmpw350jvx2.pdf is not valid.	2026-04-13
+https://openarchive.ki.se/xmlui/bitstream/handle/10616/40050/thesis.pdf?sequence=1&isAllowed=y	thesis.pdf	Input document /tmp/tmp1hh_3ifk.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/nationella-riktlinjer/2020-1-6545.pdf	2020-1-6545.pdf	Input document /tmp/tmpw9lbwt9a.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2017-3-38.pdf	2017-3-38.pdf	Input document /tmp/tmph7c0n51o.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2022-12-8277.pdf	2022-12-8277.pdf	Input document /tmp/tmpossrsdt1.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/nationella-riktlinjer/2016-12-3.pdf	2016-12-3.pdf	Input document /tmp/tmppmjj8k83.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/nationella-riktlinjer/2016-12-12.pdf	2016-12-12.pdf	Input document /tmp/tmpz4_krf06.pdf is not valid.	2026-04-13
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/nationella-riktlinjer/2017-10-22.pdf	2017-10-22.pdf	Input document /tmp/tmp6uhhojzm.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/ovrigt/2023-10-8755.pdf	2023-10-8755.pdf	Input document /tmp/tmpu113wfdv.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2022-6-8005.pdf	2022-6-8005.pdf	Input document /tmp/tmp6xlxm4gs.pdf is not valid.	2026-04-14
+http://www.lakartidningen.se/OldPdfFiles/2003/26952.pdf	26952.pdf	Input document /tmp/tmpwjk68msv.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/meddelandeblad/2013-12-34.pdf	2013-12-34.pdf	Input document /tmp/tmpagynm8sa.pdf is not valid.	2026-04-14
+https://www.scb.se/contentassets/f9ec479b50e64487a8a3bcc1366b2ed6/le0103_2010a01_br_le123br1201.pdf	le0103_2010a01_br_le123br1201.pdf	Timeout after 600s	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2022-11-8180.pdf	2022-11-8180.pdf	Input document /tmp/tmplnl1udn6.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/vagledning/2017-10-25.pdf	2017-10-25.pdf	Input document /tmp/tmpv5spq2di.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/foreskrifter-och-allmanna-rad/2022-6-7916.pdf	2022-6-7916.pdf	Input document /tmp/tmpeuvef4b2.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/ovrigt/2018-8-6.pdf	2018-8-6.pdf	Input document /tmp/tmpq3p15u36.pdf is not valid.	2026-04-14
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC10766253/pdf/medi-103-e36850.pdf	medi-103-e36850.pdf	Input document /tmp/tmp6_mm0x17.pdf is not valid.	2026-04-14
+https://www.socialstyrelsen.se/globalassets/sharepoint-dokument/artikelkatalog/handbocker/2015-4-10.pdf	2015-4-10.pdf	Input document /tmp/tmp47p0erlj.pdf is not valid.	2026-04-14

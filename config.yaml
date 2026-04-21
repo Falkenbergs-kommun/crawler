@@ -23,6 +23,20 @@ collections:
           - "sites.google.com"
         url_filter: "/falkenberg.se/bufdigitalisering/"
 
+  - name: digitalguidenstdochresurser
+    sites:
+      - url: https://sites.google.com/falkenberg.se/digitalguidenstdochresurser
+        max_depth: 3
+        allowed_domains:
+          - sites.google.com
+        url_filter: /falkenberg.se/digitalguidenstdochresurser/
+  - name: utskrift
+    sites:
+      - url: https://sites.google.com/falkenberg.se/utskrift
+        max_depth: 3
+        allowed_domains:
+          - sites.google.com
+        url_filter: /falkenberg.se/utskrift/
 external_sites:
   - name: "skolverket"
     base_url: "https://www.skolverket.se"
@@ -78,3 +92,43 @@ external_sites:
     user_agent: "FalkenbergKommun-RAG-Bot/1.0"
     ocr: false
     discover_linked_documents: true
+intranet_articles:
+  - collection: digitalguiden
+    article_id: 3419
+    display_name: Digitalguiden startsida
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3420
+    display_name: Digitalguiden uppdrag
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3421
+    display_name: Digitalguiden samsyn
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3422
+    display_name: Digitalguiden förväntningar
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3423
+    display_name: Digitalguiden regler och riktlinjer
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3424
+    display_name: Digitalguiden systemförvaltning
+    follow_links: true
+    follow_external_links: true
+  - collection: digitalguiden
+    article_id: 3425
+    display_name: Digitalguiden säkerhet
+    follow_links: true
+    follow_external_links: true
+single_pages:
+  - collection: skollagen
+    url: https://www.riksdagen.se/sv/dokument-och-lagar/dokument/svensk-forfattningssamling/skollag-2010800_sfs-2010-800/
+    display_name: Skollagen

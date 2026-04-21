@@ -44,12 +44,42 @@ class ExternalSiteConfig:
 
 
 @dataclass
+class IntranetArticleConfig:
+    collection: str  # Qdrant collection (groups related articles)
+    article_id: int
+    display_name: str
+    follow_links: bool = False
+    follow_external_links: bool = False
+
+
+@dataclass
+class SinglePageConfig:
+    collection: str  # Qdrant collection
+    url: str
+    display_name: str
+
+
+@dataclass
+class IntranetDBConfig:
+    host: str
+    name: str
+    user: str
+    password: str
+    prefix: str = "ez3pg_"
+    base_url: str = "https://intranet.falkenberg.se"
+
+
+@dataclass
 class AppConfig:
     openai_api_key: str
     qdrant_url: str
     qdrant_api_key: str | None
     collections: list[CollectionConfig]
     external_sites: list[ExternalSiteConfig] = field(default_factory=list)
+    intranet_articles: list[IntranetArticleConfig] = field(default_factory=list)
+    single_pages: list[SinglePageConfig] = field(default_factory=list)
+    intranet_db: IntranetDBConfig | None = None
+    config_dir: Path = field(default_factory=lambda: Path("."))
 
 
 def load_config(config_path: str = "config.yaml") -> AppConfig:
@@ -92,10 +122,46 @@ def load_config(config_path: str = "config.yaml") -> AppConfig:
             discover_linked_documents=ext.get("discover_linked_documents", False),
         ))
 
+    intranet_articles = []
+    for art in raw.get("intranet_articles", []):
+        intranet_articles.append(IntranetArticleConfig(
+            collection=art["collection"],
+            article_id=int(art["article_id"]),
+            display_name=art.get("display_name", ""),
+            follow_links=art.get("follow_links", False),
+            follow_external_links=art.get("follow_external_links", False),
+        ))
+
+    single_pages = []
+    for sp in raw.get("single_pages", []):
+        single_pages.append(SinglePageConfig(
+            collection=sp["collection"],
+            url=sp["url"],
+            display_name=sp.get("display_name", ""),
+        ))
+
+    intranet_db: IntranetDBConfig | None = None
+    db_host = os.environ.get("INTRANET_DB_HOST", "").strip()
+    if db_host:
+        intranet_db = IntranetDBConfig(
+            host=db_host,
+            name=os.environ.get("INTRANET_DB_NAME", "").strip(),
+            user=os.environ.get("INTRANET_DB_USER", "").strip(),
+            password=os.environ.get("INTRANET_DB_PASS", ""),
+            prefix=os.environ.get("INTRANET_DB_PREFIX", "ez3pg_").strip(),
+            base_url=os.environ.get(
+                "INTRANET_BASE_URL", "https://intranet.falkenberg.se"
+            ).strip().rstrip("/"),
+        )
+
     return AppConfig(
         openai_api_key=openai_api_key,
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_api_key,
         collections=collections,
         external_sites=external_sites,
+        intranet_articles=intranet_articles,
+        single_pages=single_pages,
+        intranet_db=intranet_db,
+        config_dir=Path(config_path).resolve().parent,
     )

@@ -9,6 +9,7 @@ import re
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 from posixpath import splitext
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -39,6 +40,47 @@ _SM_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 # Batch sizes for streaming processing — each batch is fully embedded and
 # stored before the next begins, keeping memory bounded and enabling resume.
 PAGE_BATCH_SIZE = 200
+
+
+# ---------------------------------------------------------------------------
+# Skip list — persistent record of documents that fail conversion
+# ---------------------------------------------------------------------------
+
+
+def _skip_file_path(config_dir: Path, site_name: str) -> Path:
+    """Return path to the skip list TSV for a site (e.g. skip/vardhandboken.tsv)."""
+    return config_dir / "skip" / f"{site_name}.tsv"
+
+
+def _load_skip_list(path: Path) -> dict[str, str]:
+    """Load skip list from TSV. Returns {url: error_reason}."""
+    if not path.exists():
+        return {}
+    skips: dict[str, str] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                skips[parts[0]] = parts[2]  # url → error
+    return skips
+
+
+def _append_to_skip_list(
+    path: Path, url: str, filename: str, error: str
+) -> None:
+    """Append a failed document to the skip list TSV."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not path.exists() or path.stat().st_size == 0
+    with open(path, "a") as f:
+        if write_header:
+            f.write("# Documents that failed conversion — skipped on future runs\n")
+            f.write("# Remove a line to retry that document on the next crawl\n")
+            f.write("# url\tfilename\terror\tdate\n")
+        f.write(f"{url}\t{filename}\t{error}\t{date.today().isoformat()}\n")
+
 
 # ---------------------------------------------------------------------------
 # 2a. Sitemap parser
@@ -324,7 +366,8 @@ async def process_documents(
     app_config: AppConfig,
     existing_hashes: dict[str, str],
     force: bool = False,
-) -> tuple[int, int, set[str]]:
+    max_new_docs: int | None = None,
+) -> tuple[int, int, set[str], int]:
     """Download, convert, embed and store documents sequentially.
 
     Processes one document at a time to keep memory bounded.  All
@@ -336,7 +379,17 @@ async def process_documents(
     timeouts (asyncio.to_thread) leave zombie threads consuming
     memory, which eventually triggers OOM kills.
 
-    Returns (total_vectors_stored, total_skipped, processed_urls).
+    Documents that fail conversion (timeout or exception) are added to
+    a persistent TSV skip list (skip/<site>.tsv) so future runs don't
+    re-attempt them — timeouts and convert failures are usually stable
+    per document (corrupt PDF, unusual layout). Remove a line manually
+    to retry a specific document.
+
+    max_new_docs caps the number of documents that reach Docling
+    conversion (successes + timeouts + convert failures). Download
+    errors and skip-list/Qdrant hits do NOT count against the budget.
+
+    Returns (total_vectors_stored, total_skipped, processed_urls, consumed_budget).
     """
     CONVERT_TIMEOUT = 600  # seconds — skip document if Docling takes longer
     MAX_SIZE = 50 * 1024 * 1024  # 50 MB
@@ -345,7 +398,14 @@ async def process_documents(
     stored_total = 0
     skipped = 0
     failed = 0
+    consumed_budget = 0  # docs that reached Docling (stored + timeouts + fails)
     processed_urls: set[str] = set()
+
+    # Load skip list (documents known to fail conversion)
+    skip_path = _skip_file_path(app_config.config_dir, config_name)
+    skip_list = _load_skip_list(skip_path)
+    if skip_list:
+        _echo(f"  Skip list loaded: {len(skip_list)} documents ({skip_path.name})")
 
     # Use a process pool so that Docling timeouts actually kill the worker.
     # asyncio.to_thread uses threads which cannot be killed on timeout —
@@ -358,6 +418,15 @@ async def process_documents(
         timeout=120,
     ) as client:
         for idx, (url, lastmod) in enumerate(urls.items(), 1):
+            # --- Budget check (before any work) ---
+            if max_new_docs is not None and consumed_budget >= max_new_docs:
+                remaining = total - idx + 1
+                _echo(
+                    f"  Budget reached: max_new_docs={max_new_docs} nya dokument "
+                    f"processade. Hoppar över {remaining} återstående dokument."
+                )
+                break
+
             # --- Extract filename ---
             path = urlparse(url).path
             filename = path.split("/")[-1] or "document"
@@ -365,7 +434,14 @@ async def process_documents(
             ext = ext.lower() or ".pdf"
 
             try:
-                # --- Live Qdrant check ---
+                # --- Skip list check (doesn't count against budget) ---
+                if url in skip_list:
+                    skipped += 1
+                    processed_urls.add(url)
+                    _echo(f"  [doc {idx}/{total}] Skipped (known failure): {filename}")
+                    continue
+
+                # --- Live Qdrant check (doesn't count against budget) ---
                 if not force and url_exists_in_qdrant(
                     app_config.qdrant_url, app_config.qdrant_api_key, config_name, url
                 ):
@@ -409,9 +485,10 @@ async def process_documents(
                     text = await asyncio.wait_for(future, timeout=CONVERT_TIMEOUT)
                 except asyncio.TimeoutError:
                     failed += 1
-                    _echo(
-                        f"  [doc {idx}/{total}] Timeout after {CONVERT_TIMEOUT}s: {filename}"
-                    )
+                    consumed_budget += 1
+                    err_msg = f"Timeout after {CONVERT_TIMEOUT}s"
+                    _echo(f"  [doc {idx}/{total}] {err_msg}: {filename}")
+                    _append_to_skip_list(skip_path, url, filename, err_msg)
                     # Kill the stuck worker and create a fresh pool
                     pool.shutdown(wait=False, cancel_futures=True)
                     pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
@@ -419,23 +496,30 @@ async def process_documents(
                     continue
                 except concurrent.futures.process.BrokenProcessPool as e:
                     failed += 1
+                    consumed_budget += 1
+                    err_msg = f"Worker crashed (BrokenProcessPool): {e!r}"[:200]
                     _echo(
                         f"  [doc {idx}/{total}] Worker crashed: {filename} — recreating pool"
                     )
+                    _append_to_skip_list(skip_path, url, filename, err_msg)
                     pool.shutdown(wait=False, cancel_futures=True)
                     pool = concurrent.futures.ProcessPoolExecutor(max_workers=1)
                     data = None
                     continue
                 except Exception as e:
                     failed += 1
+                    consumed_budget += 1
+                    err_msg = repr(e).split("\n")[0][:200]
                     if failed <= 10:
-                        _echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {e!r}")
+                        _echo(f"  [doc {idx}/{total}] Convert failed: {filename} — {err_msg}")
+                    _append_to_skip_list(skip_path, url, filename, err_msg)
                     data = None
                     continue
                 finally:
                     data = None  # release PDF bytes
 
                 elapsed = time.monotonic() - t0
+                consumed_budget += 1
 
                 if not text or not text.strip():
                     _echo(f"  [doc {idx}/{total}] Empty: {filename} — {elapsed:.1f}s")
@@ -505,11 +589,13 @@ async def process_documents(
 
     pool.shutdown(wait=False)
 
+    cap_str = f"/{max_new_docs}" if max_new_docs is not None else ""
     _echo(
         f"  Documents done: {stored_total} vectors stored, "
-        f"{skipped} unchanged, {failed} failed"
+        f"{skipped} unchanged, {failed} failed, "
+        f"budget consumed: {consumed_budget}{cap_str}"
     )
-    return stored_total, skipped, processed_urls
+    return stored_total, skipped, processed_urls, consumed_budget
 
 
 def _convert_document_standalone(data: bytes, ext: str, ocr: bool) -> str:
@@ -613,13 +699,21 @@ async def crawl_external_site(
     force: bool = False,
     pages_only: bool = False,
     docs_only: bool = False,
-) -> None:
+    max_new_docs: int | None = None,
+) -> int:
     """Run the full pipeline for an external website.
 
     Processes content in streaming batches to limit memory usage. Each batch
     is embedded and stored before the next begins, so interrupted runs can
     be resumed efficiently — already-stored vectors are detected via
     content-hash comparison and skipped.
+
+    max_new_docs caps how many documents reach Docling conversion. When a
+    cap is set, stale detection is skipped (an intentionally truncated run
+    cannot reliably distinguish "processed" from "not yet reached").
+
+    Returns the number of documents that consumed the budget (for
+    cross-site budget tracking in the CLI).
     """
 
     if config.discovery != "sitemap":
@@ -632,7 +726,7 @@ async def crawl_external_site(
 
     if not all_urls:
         _echo("  ERROR: Sitemap returned 0 URLs — aborting to protect existing vectors")
-        return
+        return 0
 
     # 2. Classify URLs
     pages, documents, skipped = classify_urls(all_urls, config)
@@ -740,20 +834,33 @@ async def crawl_external_site(
                 }
 
         if documents:
-            _echo(f"\nProcessing {len(documents)} new documents...")
+            cap_note = f" (max {max_new_docs} nya)" if max_new_docs is not None else ""
+            _echo(f"\nProcessing {len(documents)} new documents{cap_note}...")
 
-            doc_stored, doc_skipped, doc_urls = await process_documents(
-                documents, config, config.name, app_config, existing_hashes, force
+            doc_stored, doc_skipped, doc_urls, consumed_budget = await process_documents(
+                documents, config, config.name, app_config, existing_hashes, force,
+                max_new_docs=max_new_docs,
             )
             total_stored += doc_stored
             total_skipped += doc_skipped
             all_processed_urls.update(doc_urls)
+        else:
+            consumed_budget = 0
+    else:
+        consumed_budget = 0
 
     # 7. Stale detection (only for full crawls, not filtered by pages/docs-only)
     #    Safety: abort deletion if sitemap looks incomplete (>50% would be removed).
+    #    Also skip when max_new_docs was set — a capped run intentionally leaves
+    #    unprocessed docs which would otherwise be misclassified as stale.
     STALE_MAX_RATIO = 0.5
     stale_count = 0
-    if not pages_only and not docs_only:
+    if max_new_docs is not None:
+        _echo(
+            f"\n  Stale-detection hoppas över: max_new_docs={max_new_docs} "
+            f"satt, okompletta körningar kan inte säkert avgöra stale."
+        )
+    elif not pages_only and not docs_only:
         stale = original_existing_urls - all_processed_urls
         if stale and original_existing_urls:
             ratio = len(stale) / len(original_existing_urls)
@@ -775,3 +882,5 @@ async def crawl_external_site(
         f"\n  Done: {total_stored} vectors stored, "
         f"{total_skipped} unchanged, {stale_count} stale removed"
     )
+
+    return consumed_budget

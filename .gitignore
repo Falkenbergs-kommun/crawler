@@ -5,3 +5,9 @@ __pycache__/
 dist/
 *.egg-info/
 .local-libs/
+
+# Runtime logs and local artifacts
+crawl-*.log
+logs/
+config.yaml.backup-*
+.claude/
