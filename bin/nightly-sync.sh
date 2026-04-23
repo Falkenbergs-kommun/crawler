@@ -11,6 +11,10 @@ set -u  # inte -e — vi hanterar fel själva per steg och samlar statusar
 CRAWLER_DIR="/home/httpd/fbg-intranet/integrationer/crawler"
 cd "$CRAWLER_DIR" || exit 1
 
+# Cron startar med minimal PATH (/usr/bin:/bin) och läser inte .bashrc/.profile,
+# så `uv` i ~/.local/bin försvinner därifrån. Lägg till den explicit.
+export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+
 # Ladda .env (CRAWLER_DIR/.env) — export alla variabler
 set -a
 # shellcheck disable=SC1091

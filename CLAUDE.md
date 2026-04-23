@@ -166,6 +166,8 @@ The pipeline flows: **crawl → chunk → embed → store**, orchestrated by `cl
 
 `crawl-external-docs` in the nightly uses `--docs-only` to skip the pages phase (3979+ URLs for Skolverket re-fetched every night would be too heavy). Pages can be scheduled separately (weekly recommended).
 
+The script prepends `$HOME/.local/bin:/usr/local/bin` to `PATH` near the top. Cron starts with a minimal `PATH` (`/usr/bin:/bin`) and does not source `.bashrc`/`.profile`, so `uv` (installed per-user in `~/.local/bin`) would otherwise fail every step with rc=127. Keep this line when editing the wrapper.
+
 ## Configuration
 
 - `config.yaml` — Defines four source types. `collections` (Google Sites crawled with Playwright). `external_sites` (sitemap-based, httpx + Docling). `intranet_articles` (Joomla articles by ID, direct DB read; `collection` field groups related articles). `single_pages` (one URL per entry, httpx + trafilatura).
